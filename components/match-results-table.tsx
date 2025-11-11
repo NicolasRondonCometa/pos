@@ -1,0 +1,874 @@
+"use client"
+
+import { useState, useMemo } from "react"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Search, ChevronLeft, ChevronRight, CheckCircle2, AlertCircle, XCircle, AlertTriangle } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import type { MatchedStudent } from "@/app/actions/credentials"
+
+interface MatchResultsTableProps {
+  results: MatchedStudent[]
+  dataType?: "students" | "guardians"
+}
+
+const ITEMS_PER_PAGE = 10
+
+const STATUS_CONFIG = {
+  matched: {
+    label: "Emparejado",
+    icon: CheckCircle2,
+    color: "bg-success-50 text-success-700 border-success-200",
+    iconColor: "text-success-500",
+  },
+  only_partner: {
+    label: "Solo Partner",
+    icon: AlertCircle,
+    color: "bg-warning-50 text-warning-700 border-warning-200",
+    iconColor: "text-warning-500",
+  },
+  only_cometa: {
+    label: "Solo Cometa",
+    icon: AlertCircle,
+    color: "bg-aurora-50 text-aurora-700 border-aurora-200",
+    iconColor: "text-aurora-500",
+  },
+  conflict_duplicate: {
+    label: "Conflicto",
+    icon: XCircle,
+    color: "bg-error-50 text-error-700 border-error-200",
+    iconColor: "text-error-500",
+  },
+}
+
+const formatSection = (section: any): string => {
+  if (!section) return "-"
+  if (typeof section === "string") {
+    try {
+      section = JSON.parse(section)
+    } catch {
+      return section
+    }
+  }
+  if (typeof section === "object" && section !== null) {
+    const grade = section.grade || ""
+    const group = section.group || ""
+    if (grade && group) {
+      return `${grade}° ${group}`
+    }
+    if (grade) return `${grade}°`
+    if (group) return group
+  }
+  return "-"
+}
+
+const getRelevantCometaFields = (data: any) => {
+  if (!data) return {}
+
+  const section = formatSection(data.section)
+  const birthdate = data.birthdate ? normalizeDateForComparison(data.birthdate) : "-"
+
+  return {
+    Nombre: data.first_name && data.last_name ? `${data.first_name} ${data.last_name}` : "-",
+    Matrícula: data.enrollment_code || "-",
+    CURP: data.identifier || "-",
+    "Fecha de Nacimiento": birthdate,
+    Género: data.gender || "-",
+    "Grado y Grupo": section,
+    Estado: data.state || "-",
+    Eliminado: data.deleted_at ? `Sí (${data.deleted_at})` : "No",
+  }
+}
+
+const getRelevantPartnerFields = (data: any) => {
+  if (!data) return {}
+
+  // Buscar el grado en múltiples campos posibles
+  const grade = data.grade_level || data.grade || data.gradelevel || data.current_grade || "-"
+  const dob = data.dob || data.birthdate
+  const birthdate = dob ? normalizeDateForComparison(dob) : "-"
+
+  return {
+    Nombre: data.first_name && data.last_name ? `${data.first_name} ${data.last_name}` : "-",
+    "Matrícula (Local ID)": data.local_id || "-",
+    "Student Number": data.student_number || "-",
+    CURP: data.curp || data.state_studentnumber || "-",
+    "Fecha de Nacimiento": birthdate,
+    Género: data.gender || "-",
+    Grado: grade,
+  }
+}
+
+const getRelevantPartnerGuardianFields = (data: any) => {
+  if (!data) return {}
+
+  return {
+    Nombre:
+      data.firstName && data.lastName
+        ? `${data.firstName} ${data.lastName}`
+        : data.first_name && data.last_name
+          ? `${data.first_name} ${data.last_name}`
+          : "-",
+    Email: data.emails || data.email || "-",
+    Teléfono: data.phones || data.phone || "-",
+    "ID Guardian": data.id || data.guardian_id || "-",
+    "ID Estudiante Asociado (PowerSchool)": data.student_id || "-",
+    "School ID Asociado (PowerSchool)": data.school_id || "-",
+  }
+}
+
+const getRelevantCometaGuardianFields = (data: any) => {
+  if (!data) return {}
+
+  return {
+    Nombre: data.first_name && data.last_name ? `${data.first_name} ${data.last_name}` : "-",
+    Email: data.email || "-",
+    Teléfono: data.phone || data.phone_number || "-",
+    "ID Guardian": data.id || data.guardian_id || "-",
+    "ID Estudiante Asociado": data.student_id || "-",
+  }
+}
+
+const normalizeDateForComparison = (dateStr: string): string => {
+  if (!dateStr) return ""
+  try {
+    // Intentar parsear la fecha y convertirla a formato YYYY-MM-DD usando UTC
+    const date = new Date(dateStr)
+    if (isNaN(date.getTime())) return ""
+
+    // Usar métodos UTC para evitar problemas de zona horaria
+    const year = date.getUTCFullYear()
+    const month = String(date.getUTCMonth() + 1).padStart(2, "0")
+    const day = String(date.getUTCDate()).padStart(2, "0")
+
+    return `${year}-${month}-${day}`
+  } catch {
+    return ""
+  }
+}
+
+const compareStudentData = (partnerData: any, cometaData: any) => {
+  if (!partnerData || !cometaData) return {}
+
+  const discrepancies: Record<string, { partner: string; cometa: string }> = {}
+
+  // Comparar nombres
+  const partnerName = `${partnerData.first_name || ""} ${partnerData.last_name || ""}`.trim().toLowerCase()
+  const cometaName = `${cometaData.first_name || ""} ${cometaData.last_name || ""}`.trim().toLowerCase()
+  if (partnerName && cometaName && partnerName !== cometaName) {
+    discrepancies.Nombre = {
+      partner: `${partnerData.first_name || ""} ${partnerData.last_name || ""}`.trim(),
+      cometa: `${cometaData.first_name || ""} ${cometaData.last_name || ""}`.trim(),
+    }
+  }
+
+  // Comparar CURP
+  const partnerCURP = (partnerData.curp || partnerData.state_studentnumber || "").toLowerCase()
+  const cometaCURP = (cometaData.identifier || "").toLowerCase()
+  if (partnerCURP && cometaCURP && partnerCURP !== cometaCURP) {
+    discrepancies.CURP = {
+      partner: partnerData.curp || partnerData.state_studentnumber || "-",
+      cometa: cometaData.identifier || "-",
+    }
+  }
+
+  const partnerDOB = partnerData.dob || partnerData.birthdate || ""
+  const cometaDOB = cometaData.birthdate || ""
+  const normalizedPartnerDOB = normalizeDateForComparison(partnerDOB)
+  const normalizedCometaDOB = normalizeDateForComparison(cometaDOB)
+
+  if (normalizedPartnerDOB && normalizedCometaDOB && normalizedPartnerDOB !== normalizedCometaDOB) {
+    discrepancies["Fecha de Nacimiento"] = {
+      partner: partnerDOB,
+      cometa: cometaDOB,
+    }
+  }
+
+  // Comparar género
+  const partnerGender = (partnerData.gender || "").toUpperCase()
+  const cometaGender = (cometaData.gender || "").toUpperCase()
+  if (partnerGender && cometaGender && partnerGender !== cometaGender) {
+    discrepancies.Género = {
+      partner: partnerData.gender || "-",
+      cometa: cometaData.gender || "-",
+    }
+  }
+
+  // Comparar grado
+  const partnerGrade = String(
+    partnerData.grade_level || partnerData.grade || partnerData.gradelevel || partnerData.current_grade || "",
+  )
+  const cometaSection = cometaData.section
+  let cometaGrade = ""
+  if (cometaSection) {
+    if (typeof cometaSection === "string") {
+      try {
+        const parsed = JSON.parse(cometaSection)
+        cometaGrade = String(parsed.grade || "")
+      } catch {
+        // Ignore parse errors
+      }
+    } else if (typeof cometaSection === "object") {
+      cometaGrade = String(cometaSection.grade || "")
+    }
+  }
+  if (partnerGrade && cometaGrade && partnerGrade !== cometaGrade) {
+    discrepancies.Grado = {
+      partner: partnerGrade,
+      cometa: cometaGrade,
+    }
+  }
+
+  return discrepancies
+}
+
+export function MatchResultsTable({ results, dataType = "students" }: MatchResultsTableProps) {
+  const [searchTerm, setSearchTerm] = useState("")
+  const [currentPage, setCurrentPage] = useState(1)
+  const [statusFilter, setStatusFilter] = useState<string>("all")
+  const [selectedStudent, setSelectedStudent] = useState<MatchedStudent | null>(null)
+  const [isModalOpen, setIsModalOpen] = useState(false)
+
+  const resultsWithDiscrepancies = useMemo(() => {
+    return results.map((result) => {
+      const discrepancies = compareStudentData(result.partnerData, result.cometaData)
+      return {
+        ...result,
+        hasDiscrepancies: Object.keys(discrepancies).length > 0,
+        discrepanciesCount: Object.keys(discrepancies).length,
+      }
+    })
+  }, [results])
+
+  const filteredResults = useMemo(() => {
+    let filtered = resultsWithDiscrepancies
+
+    if (statusFilter === "with_discrepancies") {
+      filtered = filtered.filter((r) => r.hasDiscrepancies)
+    } else if (statusFilter === "unmatched") {
+      filtered = filtered.filter((r) => r.matchStatus === "only_partner" || r.matchStatus === "only_cometa")
+    } else if (statusFilter !== "all") {
+      filtered = filtered.filter((r) => r.matchStatus === statusFilter)
+    }
+
+    if (searchTerm) {
+      filtered = filtered.filter((result) => {
+        const searchData = {
+          ...result.partnerData,
+          ...result.cometaData,
+          matchReason: result.matchReason,
+        }
+        return Object.values(searchData).some((value) => String(value).toLowerCase().includes(searchTerm.toLowerCase()))
+      })
+    }
+
+    return filtered
+  }, [resultsWithDiscrepancies, searchTerm, statusFilter])
+
+  const totalPages = Math.ceil(filteredResults.length / ITEMS_PER_PAGE)
+  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE
+  const endIndex = startIndex + ITEMS_PER_PAGE
+  const currentResults = filteredResults.slice(startIndex, endIndex)
+
+  const handleSearchChange = (value: string) => {
+    setSearchTerm(value)
+    setCurrentPage(1)
+  }
+
+  const handleStatusFilterChange = (value: string) => {
+    setStatusFilter(value)
+    setCurrentPage(1)
+  }
+
+  const handleRowClick = (student: MatchedStudent) => {
+    setSelectedStudent(student)
+    setIsModalOpen(true)
+  }
+
+  const handleStatClick = (status: string) => {
+    setStatusFilter(status)
+    setCurrentPage(1)
+  }
+
+  const stats = useMemo(() => {
+    return {
+      matched: resultsWithDiscrepancies.filter((r) => r.matchStatus === "matched").length,
+      only_partner: resultsWithDiscrepancies.filter((r) => r.matchStatus === "only_partner").length,
+      only_cometa: resultsWithDiscrepancies.filter((r) => r.matchStatus === "only_cometa").length,
+      conflict_duplicate: resultsWithDiscrepancies.filter((r) => r.matchStatus === "conflict_duplicate").length,
+      unmatched: resultsWithDiscrepancies.filter(
+        (r) => r.matchStatus === "only_partner" || r.matchStatus === "only_cometa",
+      ).length,
+      with_discrepancies: resultsWithDiscrepancies.filter((r) => r.hasDiscrepancies).length,
+    }
+  }, [resultsWithDiscrepancies])
+
+  const getMostRecentInscription = (inscriptions: any) => {
+    if (!inscriptions) return null
+    if (typeof inscriptions === "string") {
+      try {
+        inscriptions = JSON.parse(inscriptions)
+      } catch {
+        return null
+      }
+    }
+    if (!Array.isArray(inscriptions) || inscriptions.length === 0) return null
+
+    // Ordenar por fecha y tomar la más reciente
+    const sorted = [...inscriptions].sort((a, b) => {
+      const dateA = new Date(a.created_at || a.date || 0)
+      const dateB = new Date(b.created_at || b.date || 0)
+      return dateB.getTime() - dateA.getTime()
+    })
+
+    return sorted[0]
+  }
+
+  return (
+    <>
+      <Card className="border-neutral-200 bg-gradient-to-br from-white to-neutral-25 shadow-lg w-full">
+        <CardHeader className="border-b border-neutral-100 bg-white/80 backdrop-blur-sm">
+          <div className="flex items-start justify-between">
+            <div className="space-y-1.5">
+              <CardTitle className="text-neutral-900 font-lota text-2xl font-semibold">
+                Resultados del Matching
+              </CardTitle>
+              <CardDescription className="text-neutral-600">
+                Comparación entre estudiantes de PowerSchool y Cometa
+              </CardDescription>
+            </div>
+            <Badge
+              variant="secondary"
+              className="bg-galaxy-50 text-galaxy-700 border-galaxy-200 px-3 py-1.5 text-sm font-semibold"
+            >
+              {filteredResults.length} resultados
+            </Badge>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mt-4">
+            <Card
+              className={`border-success-200 bg-success-50 cursor-pointer transition-all hover:shadow-md ${statusFilter === "matched" ? "ring-2 ring-success-400" : ""}`}
+              onClick={() => handleStatClick("matched")}
+            >
+              <CardContent className="p-3">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-success-500" />
+                  <div>
+                    <p className="text-xs text-success-600 font-medium">Emparejados</p>
+                    <p className="text-lg font-bold text-success-700">{stats.matched}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card
+              className={`border-warning-200 bg-warning-50 cursor-pointer transition-all hover:shadow-md ${statusFilter === "only_partner" ? "ring-2 ring-warning-400" : ""}`}
+              onClick={() => handleStatClick("only_partner")}
+            >
+              <CardContent className="p-3">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 text-warning-500" />
+                  <div>
+                    <p className="text-xs text-warning-600 font-medium">Solo Partner</p>
+                    <p className="text-lg font-bold text-warning-700">{stats.only_partner}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card
+              className={`border-aurora-200 bg-aurora-50 cursor-pointer transition-all hover:shadow-md ${statusFilter === "only_cometa" ? "ring-2 ring-aurora-400" : ""}`}
+              onClick={() => handleStatClick("only_cometa")}
+            >
+              <CardContent className="p-3">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 text-aurora-500" />
+                  <div>
+                    <p className="text-xs text-aurora-600 font-medium">Solo Cometa</p>
+                    <p className="text-lg font-bold text-aurora-700">{stats.only_cometa}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card
+              className={`border-error-200 bg-error-50 cursor-pointer transition-all hover:shadow-md ${statusFilter === "unmatched" ? "ring-2 ring-error-400" : ""}`}
+              onClick={() => handleStatClick("unmatched")}
+            >
+              <CardContent className="p-3">
+                <div className="flex items-center gap-2">
+                  <XCircle className="h-4 w-4 text-error-500" />
+                  <div>
+                    <p className="text-xs text-error-600 font-medium">No Emparejados</p>
+                    <p className="text-lg font-bold text-error-700">{stats.unmatched}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card
+              className={`border-orange-200 bg-orange-50 cursor-pointer transition-all hover:shadow-md ${statusFilter === "with_discrepancies" ? "ring-2 ring-orange-400" : ""}`}
+              onClick={() => handleStatClick("with_discrepancies")}
+            >
+              <CardContent className="p-3">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 text-orange-500" />
+                  <div>
+                    <p className="text-xs text-orange-600 font-medium">Con Discrepancias</p>
+                    <p className="text-lg font-bold text-orange-700">{stats.with_discrepancies}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card
+              className={`border-neutral-200 bg-neutral-50 cursor-pointer transition-all hover:shadow-md ${statusFilter === "conflict_duplicate" ? "ring-2 ring-neutral-400" : ""}`}
+              onClick={() => handleStatClick("conflict_duplicate")}
+            >
+              <CardContent className="p-3">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 text-neutral-500" />
+                  <div>
+                    <p className="text-xs text-neutral-600 font-medium">Conflictos</p>
+                    <p className="text-lg font-bold text-neutral-700">{stats.conflict_duplicate}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </CardHeader>
+
+        <CardContent className="p-6 space-y-6">
+          <div className="flex gap-3">
+            <div className="relative group flex-1">
+              <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-neutral-400 group-focus-within:text-galaxy-500 transition-colors" />
+              <Input
+                type="text"
+                placeholder="Buscar por nombre, matrícula, CURP..."
+                value={searchTerm}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                className="pl-12 h-12 border-neutral-200 bg-white focus:border-galaxy-400 focus:ring-2 focus:ring-galaxy-100 text-neutral-900 placeholder:text-neutral-400 rounded-xl shadow-sm transition-all"
+              />
+              {searchTerm && (
+                <button
+                  onClick={() => handleSearchChange("")}
+                  className="absolute right-4 top-1/2 transform -translate-y-1/2 text-neutral-400 hover:text-neutral-600 transition-colors"
+                >
+                  <span className="text-sm font-medium">Limpiar</span>
+                </button>
+              )}
+            </div>
+
+            <Select value={statusFilter} onValueChange={handleStatusFilterChange}>
+              <SelectTrigger className="w-[220px] h-12 border-neutral-200 bg-white rounded-xl shadow-sm">
+                <SelectValue placeholder="Filtrar por estado" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Todos los estados</SelectItem>
+                <SelectItem value="matched">Emparejados</SelectItem>
+                <SelectItem value="unmatched">No Emparejados</SelectItem>
+                <SelectItem value="with_discrepancies">Con Discrepancias</SelectItem>
+                <SelectItem value="only_partner">Solo Partner</SelectItem>
+                <SelectItem value="only_cometa">Solo Cometa</SelectItem>
+                <SelectItem value="conflict_duplicate">Conflictos</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="border border-neutral-200 rounded-xl overflow-hidden shadow-sm bg-white">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-gradient-to-r from-neutral-50 to-neutral-25 border-b border-neutral-200 hover:bg-neutral-50">
+                    <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                      Estado
+                    </TableHead>
+                    <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                      Nombre (Partner)
+                    </TableHead>
+                    <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                      Nombre (Cometa)
+                    </TableHead>
+                    {dataType === "students" ? (
+                      <>
+                        <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                          Matrícula
+                        </TableHead>
+                        <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                          Estado Estudiante
+                        </TableHead>
+                      </>
+                    ) : (
+                      <>
+                        <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                          Email
+                        </TableHead>
+                        <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                          Teléfono
+                        </TableHead>
+                      </>
+                    )}
+                    <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                      Razón de Match
+                    </TableHead>
+                    <TableHead className="font-semibold text-neutral-900 font-lota text-sm h-12 px-6 whitespace-nowrap">
+                      Confianza
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {currentResults.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center py-16 text-neutral-500">
+                        <div className="flex flex-col items-center gap-3">
+                          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-neutral-100">
+                            <Search className="h-8 w-8 text-neutral-400" />
+                          </div>
+                          <div className="space-y-1">
+                            <p className="font-medium text-neutral-700">No se encontraron resultados</p>
+                            <p className="text-sm text-neutral-500">Intenta con otros términos de búsqueda o filtros</p>
+                          </div>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    currentResults.map((result, index) => {
+                      const config = STATUS_CONFIG[result.matchStatus]
+                      const Icon = config.icon
+                      const partnerName =
+                        result.partnerData?.first_name && result.partnerData?.last_name
+                          ? `${result.partnerData.first_name} ${result.partnerData.last_name}`
+                          : result.partnerData?.firstName && result.partnerData?.lastName
+                            ? `${result.partnerData.firstName} ${result.partnerData.lastName}`
+                            : result.partnerData?.nombre || "-"
+                      const cometaName =
+                        result.cometaData?.first_name && result.cometaData?.last_name
+                          ? `${result.cometaData.first_name} ${result.cometaData.last_name}`
+                          : result.cometaData?.nombre || "-"
+
+                      const specificData =
+                        dataType === "students"
+                          ? {
+                              col1: result.partnerData?.local_id || result.cometaData?.enrollment_code || "-",
+                              col2: result.cometaData?.state || result.partnerData?.enroll_status || "-",
+                            }
+                          : {
+                              col1: result.partnerData?.emails || result.cometaData?.email || "-",
+                              col2: result.partnerData?.phones || result.cometaData?.phone || "-",
+                            }
+
+                      const isDeleted = result.cometaData?.deleted_at || result.partnerData?.deleted_at
+                      const isInactive =
+                        specificData.col2?.toLowerCase() === "inactive" ||
+                        specificData.col2?.toLowerCase() === "inactivo"
+
+                      return (
+                        <TableRow
+                          key={index}
+                          onClick={() => handleRowClick(result)}
+                          className="hover:bg-galaxy-50/50 transition-colors border-b border-neutral-100 last:border-0 cursor-pointer"
+                        >
+                          <TableCell className="py-4 px-6">
+                            <div className="flex flex-col gap-1.5">
+                              <Badge variant="secondary" className={`${config.color} flex items-center gap-1.5 w-fit`}>
+                                <Icon className={`h-3.5 w-3.5 ${config.iconColor}`} />
+                                {config.label}
+                              </Badge>
+                              {result.hasDiscrepancies && (
+                                <Badge
+                                  variant="secondary"
+                                  className="bg-orange-50 text-orange-700 border-orange-200 flex items-center gap-1 w-fit text-xs"
+                                >
+                                  <AlertTriangle className="h-3 w-3" />
+                                  {result.discrepanciesCount} diferencia{result.discrepanciesCount !== 1 ? "s" : ""}
+                                </Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-neutral-700 py-4 px-6 font-medium text-sm">
+                            {partnerName}
+                          </TableCell>
+                          <TableCell className="text-neutral-700 py-4 px-6 font-medium text-sm">{cometaName}</TableCell>
+                          <TableCell className="text-neutral-700 py-4 px-6 font-mono text-sm">
+                            {specificData.col1}
+                          </TableCell>
+                          <TableCell className="py-4 px-6">
+                            {dataType === "students" ? (
+                              <div className="flex flex-col gap-1.5">
+                                {isDeleted ? (
+                                  <Badge
+                                    variant="secondary"
+                                    className="bg-error-50 text-error-700 border-error-200 w-fit"
+                                  >
+                                    Eliminado
+                                  </Badge>
+                                ) : isInactive ? (
+                                  <Badge
+                                    variant="secondary"
+                                    className="bg-warning-50 text-warning-700 border-warning-200 w-fit"
+                                  >
+                                    Inactivo
+                                  </Badge>
+                                ) : (
+                                  <Badge
+                                    variant="secondary"
+                                    className="bg-success-50 text-success-700 border-success-200 w-fit"
+                                  >
+                                    Activo
+                                  </Badge>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-neutral-700 font-mono text-sm">{specificData.col2}</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-neutral-700 py-4 px-6 text-sm">
+                            {result.matchReason ? (
+                              <Badge variant="outline" className="font-mono text-xs">
+                                {result.matchReason}
+                              </Badge>
+                            ) : (
+                              "-"
+                            )}
+                          </TableCell>
+                          <TableCell className="text-neutral-700 py-4 px-6 text-sm">
+                            <div className="flex items-center gap-2">
+                              <div className="w-16 h-2 bg-neutral-200 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-galaxy-500 transition-all"
+                                  style={{ width: `${result.confidence * 100}%` }}
+                                />
+                              </div>
+                              <span className="text-xs font-medium">{Math.round(result.confidence * 100)}%</span>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between pt-2">
+              <div className="flex items-center gap-2">
+                <p className="text-sm text-neutral-600 font-medium">
+                  Mostrando{" "}
+                  <span className="text-neutral-900 font-semibold">
+                    {startIndex + 1}-{Math.min(endIndex, filteredResults.length)}
+                  </span>{" "}
+                  de <span className="text-neutral-900 font-semibold">{filteredResults.length}</span>
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={currentPage === 1}
+                  className="border-neutral-300 hover:border-galaxy-400 hover:bg-galaxy-50 hover:text-galaxy-700 disabled:opacity-40 disabled:cursor-not-allowed bg-white h-9 px-4 font-medium transition-all"
+                >
+                  <ChevronLeft className="h-4 w-4 mr-1" />
+                  Anterior
+                </Button>
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-neutral-50 rounded-lg border border-neutral-200">
+                  <span className="text-sm font-medium text-neutral-600">Página</span>
+                  <span className="text-sm font-bold text-neutral-900">{currentPage}</span>
+                  <span className="text-sm text-neutral-400">/</span>
+                  <span className="text-sm font-medium text-neutral-600">{totalPages}</span>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={currentPage === totalPages}
+                  className="border-neutral-300 hover:border-galaxy-400 hover:bg-galaxy-50 hover:text-galaxy-700 disabled:opacity-40 disabled:cursor-not-allowed bg-white h-9 px-4 font-medium transition-all"
+                >
+                  Siguiente
+                  <ChevronRight className="h-4 w-4 ml-1" />
+                </Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
+        <DialogContent className="max-w-[98vw] lg:max-w-[90vw] max-h-[95vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-lota text-neutral-900">
+              {dataType === "guardians" ? "Detalles del Tutor" : "Detalles del Estudiante"}
+            </DialogTitle>
+            <DialogDescription className="text-neutral-600">
+              Información completa de PowerSchool y Cometa
+            </DialogDescription>
+          </DialogHeader>
+
+          {selectedStudent && (
+            <div className="space-y-6 mt-4">
+              <div className="flex items-center gap-3 p-4 bg-neutral-50 rounded-lg border border-neutral-200">
+                <Badge
+                  variant="secondary"
+                  className={`${STATUS_CONFIG[selectedStudent.matchStatus].color} flex items-center gap-1.5`}
+                >
+                  {(() => {
+                    const Icon = STATUS_CONFIG[selectedStudent.matchStatus].icon
+                    return <Icon className={`h-4 w-4 ${STATUS_CONFIG[selectedStudent.matchStatus].iconColor}`} />
+                  })()}
+                  {STATUS_CONFIG[selectedStudent.matchStatus].label}
+                </Badge>
+                {selectedStudent.matchReason && (
+                  <Badge variant="outline" className="font-mono">
+                    {selectedStudent.matchReason}
+                  </Badge>
+                )}
+                <div className="ml-auto flex items-center gap-2">
+                  <span className="text-sm text-neutral-600">Confianza:</span>
+                  <span className="text-sm font-bold text-neutral-900">
+                    {Math.round(selectedStudent.confidence * 100)}%
+                  </span>
+                </div>
+              </div>
+
+              {dataType === "students" &&
+                (() => {
+                  const discrepancies = compareStudentData(selectedStudent.partnerData, selectedStudent.cometaData)
+                  const hasDiscrepancies = Object.keys(discrepancies).length > 0
+
+                  if (hasDiscrepancies) {
+                    return (
+                      <Card className="border-warning-200 bg-warning-50/30">
+                        <CardHeader className="pb-4 border-b border-warning-100">
+                          <div className="flex items-center gap-2">
+                            <AlertCircle className="h-5 w-5 text-warning-600" />
+                            <CardTitle className="text-lg font-lota text-warning-900">
+                              Discrepancias Detectadas
+                            </CardTitle>
+                          </div>
+                          <CardDescription className="text-warning-700">
+                            Los siguientes campos tienen valores diferentes entre PowerSchool y Cometa
+                          </CardDescription>
+                        </CardHeader>
+                        <CardContent className="pt-4">
+                          <div className="space-y-4">
+                            {Object.entries(discrepancies).map(([field, values]) => (
+                              <div key={field} className="p-3 bg-white rounded-lg border border-warning-200">
+                                <p className="text-sm font-semibold text-warning-900 mb-2">{field}</p>
+                                <div className="grid grid-cols-2 gap-4">
+                                  <div>
+                                    <p className="text-xs text-galaxy-600 font-medium mb-1">PowerSchool</p>
+                                    <p className="text-sm text-neutral-900 font-mono bg-galaxy-50 px-2 py-1 rounded">
+                                      {values.partner}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs text-aurora-600 font-medium mb-1">Cometa</p>
+                                    <p className="text-sm text-neutral-900 font-mono bg-aurora-50 px-2 py-1 rounded">
+                                      {values.cometa}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  }
+                  return null
+                })()}
+
+              {dataType === "guardians" && selectedStudent.cometaData?.student_id && (
+                <Card className="border-blue-200 bg-blue-50/30">
+                  <CardHeader className="pb-4 border-b border-blue-100">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="h-5 w-5 text-blue-600" />
+                      <CardTitle className="text-lg font-lota text-blue-900">Estudiante Asociado</CardTitle>
+                    </div>
+                    <CardDescription className="text-blue-700">
+                      Este tutor está asociado al siguiente estudiante en Cometa
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="pt-4">
+                    <div className="p-3 bg-white rounded-lg border border-blue-200">
+                      <p className="text-sm font-semibold text-blue-900 mb-2">ID del Estudiante:</p>
+                      <p className="text-sm text-neutral-900 font-mono bg-blue-50 px-2 py-1 rounded">
+                        {selectedStudent.cometaData.student_id}
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              <div className="grid md:grid-cols-2 gap-6">
+                <Card className="border-galaxy-200 bg-galaxy-50/30">
+                  <CardHeader className="pb-4 border-b border-galaxy-100">
+                    <CardTitle className="text-xl font-lota text-galaxy-900">PowerSchool</CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-4">
+                    {selectedStudent.partnerData ? (
+                      <div className="space-y-3">
+                        {Object.entries(
+                          dataType === "guardians"
+                            ? getRelevantPartnerGuardianFields(selectedStudent.partnerData)
+                            : getRelevantPartnerFields(selectedStudent.partnerData),
+                        ).map(([key, value]) => (
+                          <div
+                            key={key}
+                            className="flex flex-col sm:flex-row sm:justify-between gap-2 py-3 border-b border-galaxy-100 last:border-0"
+                          >
+                            <span className="text-sm font-semibold text-galaxy-700 min-w-[180px]">{key}</span>
+                            <span className="text-sm text-neutral-900 sm:text-right break-words">
+                              {value !== null && value !== undefined ? String(value) : "-"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-neutral-500 italic py-8 text-center">No hay datos de PowerSchool</p>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card className="border-aurora-200 bg-aurora-50/30">
+                  <CardHeader className="pb-4 border-b border-aurora-100">
+                    <CardTitle className="text-xl font-lota text-aurora-900">Cometa (Schools)</CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-4">
+                    {selectedStudent.cometaData ? (
+                      <div className="space-y-3">
+                        {Object.entries(
+                          dataType === "guardians"
+                            ? getRelevantCometaGuardianFields(selectedStudent.cometaData)
+                            : getRelevantCometaFields(selectedStudent.cometaData),
+                        ).map(([key, value]) => (
+                          <div
+                            key={key}
+                            className="flex flex-col sm:flex-row sm:justify-between gap-2 py-3 border-b border-aurora-100 last:border-0"
+                          >
+                            <span className="text-sm font-semibold text-aurora-700 min-w-[180px]">{key}</span>
+                            <span className="text-sm text-neutral-900 sm:text-right break-words">
+                              {value !== null && value !== undefined ? String(value) : "-"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-neutral-500 italic py-8 text-center">No hay datos de Cometa</p>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
