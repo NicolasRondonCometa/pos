@@ -18,6 +18,7 @@ import {
   type MatchRule,
   type MatchedStudent,
   getGuardiansForSingleSchool, // Agregando import de getGuardiansForSingleSchool
+  getGuardiansForSingleSchoolBatch,
 } from "@/app/actions/credentials"
 import { Upload, ArrowLeft, CheckCircle2, Loader2, Users, UserCheck } from "lucide-react"
 import { StudentsTable } from "./students-table"
@@ -92,6 +93,7 @@ export function CredentialsForm() {
   const [cometaData, setCometaData] = useState<any[]>([])
   const [isLoadingPowerschool, setIsLoadingPowerschool] = useState(false)
   const [isLoadingCometa, setIsLoadingCometa] = useState(false)
+  const [includeInactiveStudents, setIncludeInactiveStudents] = useState(false)
 
   const processFile = async (file: File) => {
     setFileName(file.name)
@@ -258,83 +260,191 @@ export function CredentialsForm() {
         }
       } else if (type === "guardians") {
         setIsLoadingPowerschool(true)
-        setLoadingMessage("Cargando tutores de PowerSchool...")
+        setLoadingMessage("Iniciando carga de tutores de PowerSchool...")
 
         try {
           const allGuardians: any[] = []
           const totalSchools = selectedSchools.length
+          const BATCH_SIZE = 50 // Procesar 50 estudiantes por lote para eficiencia
+          const MAX_STUDENTS_FOR_TEST = 999999 // Sin límite - procesar todos los estudiantes
 
           for (let i = 0; i < selectedSchools.length; i++) {
             const schoolId = selectedSchools[i]
             const school = schools.find((s) => s.id === schoolId)
             const schoolName = school?.name || `Escuela ${schoolId}`
 
+            setLoadingMessage(
+              `📚 Escuela ${i + 1}/${totalSchools}: ${schoolName}\n\n` +
+                `🔍 Obteniendo lista de estudiantes...\n\n` +
+                `💡 El proceso se realiza en lotes de ${BATCH_SIZE} estudiantes\n` +
+                `📊 La barra se actualizará cada lote completado`,
+            )
+            console.log(`[v0] [${i + 1}/${totalSchools}] Procesando ${schoolName}`)
+
+            const startTime = Date.now()
+            let isComplete = false
+            let startIndex = 0
+            let guardiansMapForSchool: Record<string, any> = {}
+
+            console.log(`[v0] 🚀 CLIENT: Iniciando procesamiento por lotes para escuela ${schoolId}`)
+
+            // Procesar en lotes hasta completar todos los estudiantes
+            let batchNumber = 1
+            let totalStudentsKnown = 0
+            
+            // Inicializar la barra de progreso desde el inicio
             setGuardiansProgress({
               currentSchool: schoolId,
               currentSchoolName: schoolName,
               schoolIndex: i + 1,
               totalSchools,
               currentStudent: 0,
-              totalStudents: 1,
+              totalStudents: 1, // Se actualizará con el valor real
               totalGuardians: allGuardians.length,
               isLoadingComplete: false,
             })
-
-            setLoadingMessage(`Procesando tutores de ${schoolName}...`)
-            console.log(`[v0] [${i + 1}/${totalSchools}] Procesando ${schoolName}`)
-
-            let simulatedProgress = 0
-            const progressInterval = setInterval(() => {
-              simulatedProgress += 5
-              if (simulatedProgress <= 90) {
-                // Dejar espacio para que se complete al 100% cuando termine realmente
-                setGuardiansProgress((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        currentStudent: Math.floor((simulatedProgress / 100) * (prev.totalStudents || 100)),
-                      }
-                    : null,
-                )
+            
+            while (!isComplete) { // Procesar todos los estudiantes sin límite
+              console.log(`[v0] 🔵 CLIENT: Llamando batch con startIndex=${startIndex}, BATCH_SIZE=${BATCH_SIZE}`)
+              
+              // Actualizar progreso antes del lote
+              if (totalStudentsKnown > 0) {
+                setGuardiansProgress({
+                  currentSchool: schoolId,
+                  currentSchoolName: schoolName,
+                  schoolIndex: i + 1,
+                  totalSchools,
+                  currentStudent: startIndex,
+                  totalStudents: totalStudentsKnown,
+                  totalGuardians: allGuardians.length + Object.keys(guardiansMapForSchool).length,
+                  isLoadingComplete: false,
+                })
               }
-            }, 500)
 
-            // Llamar a la función que procesa UNA escuela
-            const result = await getGuardiansForSingleSchool(
-              selectedIntegration.tenant_integration_id,
-              schoolId,
-              "powerschool",
-            )
-
-            clearInterval(progressInterval)
-
-            if (result.success && result.guardians) {
-              allGuardians.push(...result.guardians)
-              setPowerschoolData([...allGuardians])
-
-              console.log(
-                `[v0] [${i + 1}/${totalSchools}] ${schoolName}: ${result.guardians.length} tutores (total acumulado: ${allGuardians.length})`,
+              // Mensaje mientras procesa el lote
+              setLoadingMessage(
+                `📚 Escuela ${i + 1}/${totalSchools}: ${schoolName}\n\n` +
+                  `⏳ Procesando lote ${batchNumber}...\n` +
+                  `🔄 Obteniendo tutores de ${BATCH_SIZE} estudiantes\n` +
+                  `⚠️ Esto puede tomar unos segundos...\n\n` +
+                  `💡 La barra se actualizará al completar este lote`,
               )
 
+              const result = await getGuardiansForSingleSchoolBatch(
+                selectedIntegration.tenant_integration_id,
+                schoolId,
+                "powerschool",
+                startIndex,
+                BATCH_SIZE,
+                guardiansMapForSchool,
+              )
+
+              console.log(
+                `[v0] 🟢 CLIENT: Resultado batch recibido - success: ${result.success}, processedCount: ${result.processedCount}, totalStudents: ${result.totalStudents}, isComplete: ${result.isComplete}`,
+              )
+
+              batchNumber++
+
+              if (!result.success) {
+                console.error(`[v0] Error en escuela ${schoolName}:`, result.error)
+                setLoadingMessage(
+                  `❌ Error en escuela ${i + 1}/${totalSchools}: ${schoolName}\n` +
+                    `⚠️ ${result.error || "Error desconocido"}\n` +
+                    `Continuando con la siguiente escuela...`,
+                )
+                await new Promise((resolve) => setTimeout(resolve, 2000))
+                break
+              }
+
+              // Actualizar el mapa de tutores con los nuevos resultados
+              if (result.guardians) {
+                result.guardians.forEach((guardian: any) => {
+                  const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
+                  if (guardianId) {
+                    guardiansMapForSchool[guardianId] = guardian
+                  }
+                })
+              }
+
+              const totalStudents = result.totalStudents || 1
+              const processedCount = result.processedCount || 0
+              isComplete = result.isComplete || false
+              
+              // Guardar el total de estudiantes la primera vez
+              if (totalStudentsKnown === 0) {
+                totalStudentsKnown = totalStudents
+              }
+
+              // Actualizar progreso con datos reales
               setGuardiansProgress({
                 currentSchool: schoolId,
                 currentSchoolName: schoolName,
                 schoolIndex: i + 1,
                 totalSchools,
-                currentStudent: result.studentCount || 0,
-                totalStudents: result.studentCount || 1,
-                totalGuardians: allGuardians.length,
+                currentStudent: processedCount,
+                totalStudents: totalStudentsKnown, // Total real de estudiantes
+                totalGuardians: allGuardians.length + Object.keys(guardiansMapForSchool).length,
                 isLoadingComplete: false,
               })
-            } else {
-              console.error(`[v0] Error en escuela ${schoolName}:`, result.error)
+
+              const progressPercentage = Math.round((processedCount / totalStudentsKnown) * 100)
+              const remainingStudents = totalStudentsKnown - processedCount
+
+              setLoadingMessage(
+                `📚 Escuela ${i + 1}/${totalSchools}: ${schoolName}\n\n` +
+                  `✅ Lote ${batchNumber - 1} completado!\n\n` +
+                  `📊 Progreso: ${processedCount}/${totalStudentsKnown} estudiantes (${progressPercentage}%)\n` +
+                  `👨‍👩‍👧 ${Object.keys(guardiansMapForSchool).length} tutores únicos encontrados\n` +
+                  `⏱️ Faltan ${remainingStudents} estudiantes\n\n` +
+                  (isComplete ? `🎉 ¡Escuela completada!` : `🔄 Preparando siguiente lote...`),
+              )
+
+              startIndex += BATCH_SIZE
+              
+              // Dar un pequeño respiro visual antes del siguiente lote
+              if (!isComplete) {
+                await new Promise((resolve) => setTimeout(resolve, 500))
+              }
+            }
+
+            // Al completar la escuela, agregar todos los tutores únicos
+            const schoolGuardians = Object.values(guardiansMapForSchool)
+            allGuardians.push(...schoolGuardians)
+            setPowerschoolData([...allGuardians])
+
+            const endTime = Date.now()
+            const durationSeconds = Math.round((endTime - startTime) / 1000)
+
+            console.log(
+              `[v0] [${i + 1}/${totalSchools}] ${schoolName}: ${schoolGuardians.length} tutores (total acumulado: ${allGuardians.length})`,
+            )
+
+            setLoadingMessage(
+              `✅ Escuela ${i + 1}/${totalSchools} completada: ${schoolName}\n\n` +
+                `👥 Todos los estudiantes procesados\n` +
+                `👨‍👩‍👧 ${schoolGuardians.length} tutores únicos encontrados\n` +
+                `⏱️ Tiempo: ${durationSeconds}s\n` +
+                `📊 Total acumulado: ${allGuardians.length} tutores`,
+            )
+
+            // Dar un momento para que el usuario vea el mensaje de completado
+            if (i < totalSchools - 1) {
+              await new Promise((resolve) => setTimeout(resolve, 1500))
             }
           }
 
           setIsLoadingPowerschool(false)
           setGuardiansProgress(null)
           setPowerschoolData(allGuardians)
-          console.log("[v0] Total tutores de PowerSchool cargados:", allGuardians.length)
+          setLoadingMessage(
+            `🎉 ¡Proceso completado!\n\n` +
+              `📚 ${totalSchools} escuelas procesadas\n` +
+              `👨‍👩‍👧 ${allGuardians.length} tutores totales cargados`,
+          )
+          console.log(`[v0] Total tutores de PowerSchool cargados:`, allGuardians.length)
+
+          // Dar un momento para mostrar el mensaje final antes de cargar Cometa
+          await new Promise((resolve) => setTimeout(resolve, 1500))
 
           if (tenantId) {
             loadCometaGuardians(tenantId)
@@ -364,7 +474,12 @@ export function CredentialsForm() {
     setLoadingMessage("Cargando tutores de Cometa...")
 
     try {
-      const result = await getCometaGuardians(selectedIntegration.tenant_integration_id, tenant_id, selectedSchools)
+      const result = await getCometaGuardians(
+        selectedIntegration.tenant_integration_id,
+        tenant_id,
+        selectedSchools,
+        includeInactiveStudents,
+      )
 
       setIsLoadingCometa(false)
       if (result.success && result.guardians) {
@@ -430,6 +545,7 @@ export function CredentialsForm() {
           tenantId,
           powerschoolData,
           rules,
+          includeInactiveStudents,
         )
 
         if (!result.success || !result.results) {
@@ -454,6 +570,7 @@ export function CredentialsForm() {
           tenantId,
           selectedSchools,
           powerschoolData,
+          cometaData, // ✅ Pasar los datos de Cometa que ya tenemos
           rules,
         )
 
@@ -586,7 +703,9 @@ export function CredentialsForm() {
         <Card className="border-neutral-200 bg-white shadow-sm w-full max-w-2xl">
           <CardContent className="flex flex-col items-center justify-center p-12 space-y-6">
             <Spinner className="h-12 w-12 text-galaxy-500" />
-            <p className="text-lg font-medium text-neutral-900 font-lota text-center">{loadingMessage}</p>
+            <div className="text-lg font-medium text-neutral-900 font-lota text-center whitespace-pre-line">
+              {loadingMessage}
+            </div>
             <p className="text-sm text-neutral-600 text-center">Por favor espere mientras procesamos su solicitud</p>
 
             {guardiansProgress && (
@@ -976,8 +1095,8 @@ export function CredentialsForm() {
                 <Loader2 className="h-5 w-5 animate-spin" />
                 Cargando Tutores de PowerSchool
               </CardTitle>
-              <CardDescription className="text-galaxy-700">
-                Obteniendo tutores del sistema PowerSchool...
+              <CardDescription className="text-galaxy-700 whitespace-pre-line">
+                {loadingMessage || "Obteniendo tutores del sistema PowerSchool..."}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -1072,6 +1191,35 @@ export function CredentialsForm() {
 
         {!isLoadingPowerschool && !isLoadingCometa && powerschoolData.length > 0 && dataType === "guardians" && (
           <StudentsTable students={powerschoolData} dataType="guardians" />
+        )}
+
+        {!isLoadingPowerschool && !isLoadingCometa && powerschoolData.length > 0 && (
+          <Card className="border-blue-200 bg-blue-50">
+            <CardHeader>
+              <CardTitle className="text-blue-900 font-lota text-lg">Opciones de Filtrado</CardTitle>
+              <CardDescription className="text-blue-700">
+                Configura qué estudiantes incluir de Cometa en el matching
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <label className="flex items-start gap-3 cursor-pointer group">
+                <Checkbox
+                  checked={includeInactiveStudents}
+                  onCheckedChange={(checked) => setIncludeInactiveStudents(checked as boolean)}
+                  className="mt-0.5"
+                />
+                <div className="flex-1">
+                  <span className="text-sm font-medium text-neutral-900 group-hover:text-blue-700 transition-colors">
+                    Incluir estudiantes inactivos o dados de baja de Cometa
+                  </span>
+                  <p className="text-xs text-neutral-600 mt-1">
+                    Por defecto solo se cargan estudiantes con estado <strong>"active"</strong>. 
+                    Marca esta opción para incluir estudiantes con estados <strong>"inactive"</strong> y <strong>"dropped_out"</strong>.
+                  </p>
+                </div>
+              </label>
+            </CardContent>
+          </Card>
         )}
 
         <MatchConfig

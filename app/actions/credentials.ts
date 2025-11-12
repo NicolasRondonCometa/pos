@@ -318,9 +318,15 @@ export async function getStudents(tenantIntegrationId: string, schoolId: string)
       }
     }
 
+    // Agregar school_id a cada estudiante
+    const studentsWithSchoolId = studentsData.data.map((student: any) => ({
+      ...student,
+      school_id: schoolId,
+    }))
+
     return {
       success: true,
-      students: studentsData.data,
+      students: studentsWithSchoolId,
     }
   } catch (error) {
     console.error("[v0] Error in getStudents:", error)
@@ -331,7 +337,12 @@ export async function getStudents(tenantIntegrationId: string, schoolId: string)
   }
 }
 
-export async function getCometaStudents(tenantIntegrationId: string, tenantId: string) {
+export async function getCometaStudents(
+  tenantIntegrationId: string,
+  tenantId: string,
+  schoolIds: string[] = [],
+  includeInactive: boolean = false,
+) {
   try {
     if (!COMETA_AUTH_TOKEN) {
       console.error("[v0] COMETA_AUTH_TOKEN no está configurado")
@@ -396,10 +407,26 @@ export async function getCometaStudents(tenantIntegrationId: string, tenantId: s
       }
     }
 
-    console.log("[v0] Estudiantes de Cometa obtenidos exitosamente:", cometaData.data.length)
+    let students = cometaData.data
+    console.log("[v0] ✅ Estudiantes de Cometa obtenidos:", students.length)
+
+    // 🔴 FILTRAR estudiantes inactivos si no se solicitaron
+    if (!includeInactive) {
+      const originalCount = students.length
+      students = students.filter((student) => {
+        const state = (student.state || "").toLowerCase()
+        return state === "active" || state === "activo" || state === ""
+      })
+      console.log(
+        `[v0] 📊 Filtrado de inactivos: ${originalCount} → ${students.length} estudiantes (excluidos ${originalCount - students.length})`,
+      )
+    } else {
+      console.log(`[v0] ℹ️ Incluir inactivos: SÍ - procesando todos los ${students.length} estudiantes`)
+    }
+
     return {
       success: true,
-      students: cometaData.data,
+      students: students,
     }
   } catch (error) {
     console.error("[v0] Error general en getCometaStudents:", error)
@@ -440,6 +467,24 @@ export async function matchStudents(
     "[v0] Matching students with rules:",
     sortedRules.map((r) => `${r.name} (priority: ${r.priority})`),
   )
+
+  // 🔍 DEBUG: Ver si los estudiantes traen datos de tutores
+  if (partnerStudents.length > 0) {
+    const samplePartner = partnerStudents[0]
+    console.log("[v0] 🔍 Sample PowerSchool student keys:", Object.keys(samplePartner))
+    console.log("[v0] 🔍 PowerSchool student has guardians?", {
+      guardians: samplePartner.guardians,
+      contacts: samplePartner.contacts,
+    })
+  }
+  if (cometaStudents.length > 0) {
+    const sampleCometa = cometaStudents[0]
+    console.log("[v0] 🔍 Sample Cometa student keys:", Object.keys(sampleCometa))
+    console.log("[v0] 🔍 Cometa student has guardians?", {
+      guardians: sampleCometa.guardians,
+      guardians_data: sampleCometa.guardians_data,
+    })
+  }
 
   for (const partnerStudent of partnerStudents) {
     let matched = false
@@ -563,12 +608,14 @@ export async function performMatching(
   tenantId: string,
   partnerStudents: any[],
   rules: MatchRule[],
+  includeInactive: boolean = false,
 ): Promise<{ success: boolean; results?: MatchedStudent[]; error?: string }> {
   try {
     console.log("[v0] Iniciando matching en el servidor...")
     console.log("[v0] Total estudiantes de PowerSchool recibidos:", partnerStudents.length)
+    console.log("[v0] Incluir estudiantes inactivos:", includeInactive)
 
-    const cometaResult = await getCometaStudents(tenantIntegrationId, tenantId)
+    const cometaResult = await getCometaStudents(tenantIntegrationId, tenantId, [], includeInactive)
     if (!cometaResult.success || !cometaResult.students) {
       return {
         success: false,
@@ -768,12 +815,26 @@ export async function getAllGuardiansForSchools(
         if (guardiansResult.success && guardiansResult.guardians) {
           for (const guardian of guardiansResult.guardians) {
             const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
-            if (guardianId && !guardiansMap.has(guardianId)) {
-              guardiansMap.set(guardianId, {
-                ...guardian,
-                student_id: studentId,
-                school_id: schoolId,
-              })
+            const studentInfo = {
+              student_id: studentId,
+              student_name: `${student.first_name || ""} ${student.last_name || ""}`.trim() || "-",
+              student_local_id: student.local_id || student.student_number || "-",
+            }
+            
+            if (guardianId) {
+              if (!guardiansMap.has(guardianId)) {
+                guardiansMap.set(guardianId, {
+                  ...guardian,
+                  students: [studentInfo], // Array de estudiantes
+                  school_id: schoolId,
+                })
+              } else {
+                // Agregar este estudiante a la lista de estudiantes del tutor
+                const existingGuardian = guardiansMap.get(guardianId)
+                if (!existingGuardian.students.some((s: any) => s.student_id === studentId)) {
+                  existingGuardian.students.push(studentInfo)
+                }
+              }
             }
           }
 
@@ -803,6 +864,7 @@ export async function getCometaGuardians(
   tenantIntegrationId: string,
   tenantId: string,
   schoolIds: string[],
+  includeInactive: boolean = false,
 ): Promise<{ success: boolean; guardians?: any[]; error?: string }> {
   try {
     console.log("[v0] ========== INICIO: Obteniendo tutores de Cometa ==========")
@@ -813,6 +875,7 @@ export async function getCometaGuardians(
     console.log("[v0]   - tenantIntegrationId:", tenantIntegrationId)
     console.log("[v0]   - tenantId:", tenantId)
     console.log("[v0]   - schoolIds:", schoolIds)
+    console.log("[v0]   - includeInactive:", includeInactive)
 
     if (!SCHOOLS_API_TOKEN) {
       const errorMsg = "SCHOOLS_API_TOKEN no está configurado en las variables de entorno de producción"
@@ -834,7 +897,7 @@ export async function getCometaGuardians(
 
     // Primero necesitamos obtener todos los estudiantes de Cometa para luego obtener sus tutores
     console.log("[v0] Paso 1: Obteniendo estudiantes de Cometa...")
-    const cometaStudentsResult = await getCometaStudents(tenantIntegrationId, tenantId)
+    const cometaStudentsResult = await getCometaStudents(tenantIntegrationId, tenantId, schoolIds, includeInactive)
 
     if (!cometaStudentsResult.success) {
       console.error("[v0] ❌ Error al obtener estudiantes de Cometa:", cometaStudentsResult.error)
@@ -855,6 +918,10 @@ export async function getCometaGuardians(
     const students = cometaStudentsResult.students
     console.log("[v0] ✅ Estudiantes de Cometa obtenidos:", students.length)
 
+    // Procesar todos los estudiantes
+    const studentsToProcess = students
+    console.log(`[v0] Procesando ${studentsToProcess.length} estudiantes`)
+
     const allGuardians: any[] = []
     const guardiansMap = new Map<string, any>()
     let successfulRequests = 0
@@ -863,8 +930,8 @@ export async function getCometaGuardians(
     // Obtener tutores para cada estudiante usando el endpoint de Schools API
     console.log("[v0] Paso 2: Obteniendo tutores de cada estudiante...")
 
-    for (let i = 0; i < students.length; i++) {
-      const student = students[i]
+    for (let i = 0; i < studentsToProcess.length; i++) {
+      const student = studentsToProcess[i]
       const studentId = student.id || student.student_id
 
       if (!studentId) {
@@ -874,7 +941,7 @@ export async function getCometaGuardians(
 
       const guardiansUrl = `${SCHOOLS_API_BASE_URL}/api/v1/students/${studentId}/guardians`
 
-      const progress = `${i + 1}/${students.length}`
+      const progress = `${i + 1}/${studentsToProcess.length}`
       console.log(`[v0] [${progress}] Consultando tutores del estudiante ${studentId}`)
       console.log(`[v0] [${progress}] URL completa: ${guardiansUrl}`)
 
@@ -917,12 +984,26 @@ export async function getCometaGuardians(
           let newGuardiansCount = 0
           for (const guardian of guardians) {
             const guardianId = guardian.id || guardian.email || guardian.phone
-            if (guardianId && !guardiansMap.has(guardianId)) {
-              guardiansMap.set(guardianId, {
-                ...guardian,
-                student_id: studentId,
-              })
-              newGuardiansCount++
+            const studentInfo = {
+              student_id: studentId,
+              student_name: `${student.first_name || ""} ${student.last_name || ""}`.trim() || "-",
+              student_identifier: student.identifier || student.enrollment_code || "-",
+            }
+            
+            if (guardianId) {
+              if (!guardiansMap.has(guardianId)) {
+                guardiansMap.set(guardianId, {
+                  ...guardian,
+                  students: [studentInfo], // Array de estudiantes
+                })
+                newGuardiansCount++
+              } else {
+                // Agregar este estudiante a la lista del tutor
+                const existingGuardian = guardiansMap.get(guardianId)
+                if (!existingGuardian.students.some((s: any) => s.student_id === studentId)) {
+                  existingGuardian.students.push(studentInfo)
+                }
+              }
             }
           }
 
@@ -947,7 +1028,7 @@ export async function getCometaGuardians(
       }
 
       // Pequeño delay para evitar rate limiting
-      if (i < students.length - 1) {
+      if (i < studentsToProcess.length - 1) {
         await delay(200)
       }
     }
@@ -955,15 +1036,33 @@ export async function getCometaGuardians(
     allGuardians.push(...Array.from(guardiansMap.values()))
 
     console.log("[v0] ========== FIN: Resumen de obtención de tutores ==========")
-    console.log("[v0] Estudiantes procesados:", students.length)
+    console.log(`[v0] Estudiantes procesados: ${studentsToProcess.length}`)
     console.log("[v0] Requests exitosos:", successfulRequests)
     console.log("[v0] Requests fallidos:", failedRequests)
     console.log("[v0] Total tutores únicos:", allGuardians.length)
     console.log("[v0] ============================================================")
 
+    // 🔴 OPTIMIZACIÓN: Reducir el tamaño de los datos enviados al cliente
+    // Solo enviar campos MÍNIMOS necesarios para matching
+    const slimGuardians = allGuardians.map((guardian) => ({
+      id: guardian.id,
+      first_name: guardian.first_name,
+      last_name: guardian.last_name,
+      email: guardian.email,
+      phone: guardian.phone,
+      // También incluir variantes de nombres que usa el matching
+      nombre: guardian.nombre,
+      apellido: guardian.apellido,
+      phone_number: guardian.phone_number,
+      // Incluir información de TODOS los estudiantes asociados
+      students: guardian.students || [],
+    }))
+
+    console.log(`[v0] 📦 Datos optimizados: ${allGuardians.length} tutores de Cometa -> reducidos a campos mínimos`)
+
     return {
       success: true,
-      guardians: allGuardians,
+      guardians: slimGuardians,
     }
   } catch (error) {
     console.error("[v0] ❌ Error crítico en getCometaGuardians:", error)
@@ -981,6 +1080,7 @@ export async function performGuardiansMatching(
   tenantId: string,
   schoolIds: string[],
   partnerGuardians: any[],
+  cometaGuardians: any[], // 🔴 Ahora recibe los datos de Cometa directamente
   rules: MatchRule[],
 ): Promise<{ success: boolean; results?: MatchedStudent[]; error?: string }> {
   try {
@@ -989,21 +1089,12 @@ export async function performGuardiansMatching(
     console.log("[v0] tenantId:", tenantId)
     console.log("[v0] schoolIds:", schoolIds)
     console.log("[v0] Total tutores de PowerSchool recibidos:", partnerGuardians.length)
+    console.log("[v0] Total tutores de Cometa recibidos:", cometaGuardians.length)
     console.log("[v0] Sample partner guardian:", partnerGuardians[0])
+    console.log("[v0] Sample cometa guardian:", cometaGuardians[0])
 
-    const cometaResult = await getCometaGuardians(tenantIntegrationId, tenantId, schoolIds)
-    if (!cometaResult.success || !cometaResult.guardians) {
-      console.error("[v0] Error al obtener tutores de Cometa:", cometaResult.error)
-      return {
-        success: false,
-        error: cometaResult.error || "Error al obtener tutores de Cometa",
-      }
-    }
-
-    console.log("[v0] Total tutores de Cometa:", cometaResult.guardians.length)
-    console.log("[v0] Sample cometa guardian:", cometaResult.guardians[0])
-
-    const results = await matchGuardians(partnerGuardians, cometaResult.guardians, rules)
+    // ✅ Ya no llamamos a getCometaGuardians, usamos los datos recibidos
+    const results = await matchGuardians(partnerGuardians, cometaGuardians, rules)
 
     console.log("[v0] Matching de tutores completado exitosamente")
     console.log("[v0] Total resultados:", results.length)
@@ -1035,6 +1126,16 @@ async function matchGuardians(
     "[v0] Matching guardians with rules:",
     sortedRules.map((r) => `${r.name} (priority: ${r.priority})`),
   )
+
+  // 🔴 DEBUG: Ver estructura de los primeros tutores
+  if (partnerGuardians.length > 0) {
+    console.log("[v0] 🔍 Campos disponibles en PowerSchool guardian:", Object.keys(partnerGuardians[0]))
+    console.log("[v0] 🔍 Sample PowerSchool guardian:", JSON.stringify(partnerGuardians[0]).substring(0, 300))
+  }
+  if (cometaGuardians.length > 0) {
+    console.log("[v0] 🔍 Campos disponibles en Cometa guardian:", Object.keys(cometaGuardians[0]))
+    console.log("[v0] 🔍 Sample Cometa guardian:", JSON.stringify(cometaGuardians[0]).substring(0, 300))
+  }
 
   for (const partnerGuardian of partnerGuardians) {
     let matched = false
@@ -1108,12 +1209,58 @@ async function matchGuardians(
       }
     }
 
+    // Verificar si el tutor está asignado a estudiantes comparables en ambos sistemas
+    let studentMismatch = false
+    if (matched && matchedCometaGuardian) {
+      // Obtener todos los estudiantes del tutor en ambos sistemas
+      const partnerStudents = partnerGuardian.students || []
+      const cometaStudents = matchedCometaGuardian.students || []
+
+      // Extraer apellidos (últimas 2 palabras - apellido paterno y materno)
+      const extractLastNames = (fullName: string) => {
+        const parts = fullName.split(" ").filter(p => p.length > 0)
+        if (parts.length >= 2) {
+          return parts.slice(-2).join(" ")
+        }
+        return ""
+      }
+
+      // Extraer todos los apellidos de los estudiantes de cada sistema
+      const partnerLastNamesList = partnerStudents.map((s: any) => 
+        normalizeString(extractLastNames(s.student_name || ""))
+      ).filter(Boolean)
+      
+      const cometaLastNamesList = cometaStudents.map((s: any) => 
+        normalizeString(extractLastNames(s.student_name || ""))
+      ).filter(Boolean)
+
+      console.log(`[v0] 👨‍👩‍👧‍👦 Tutor ${partnerGuardian.firstName || partnerGuardian.first_name || ""}:`)
+      console.log(`[v0]   - PowerSchool: ${partnerStudents.length} estudiante(s) - Apellidos: [${partnerLastNamesList.join(", ")}]`)
+      console.log(`[v0]   - Cometa: ${cometaStudents.length} estudiante(s) - Apellidos: [${cometaLastNamesList.join(", ")}]`)
+
+      // Verificar si hay al menos un apellido en común
+      const hasCommonLastNames = partnerLastNamesList.some(partnerLN => 
+        cometaLastNamesList.some(cometaLN => partnerLN === cometaLN)
+      )
+
+      if (!hasCommonLastNames && partnerLastNamesList.length > 0 && cometaLastNamesList.length > 0) {
+        // No hay apellidos en común = estudiantes completamente diferentes
+        studentMismatch = true
+        console.log(`[v0] ⚠️ ADVERTENCIA: Tutor emparejado pero sin apellidos en común entre estudiantes!`)
+        console.log(`[v0]   - PowerSchool apellidos: ${partnerLastNamesList.join(", ")}`)
+        console.log(`[v0]   - Cometa apellidos: ${cometaLastNamesList.join(", ")}`)
+      } else if (hasCommonLastNames) {
+        console.log(`[v0] ✅ Apellidos coinciden - mismo tutor para la misma familia`)
+      }
+    }
+
     results.push({
       partnerData: partnerGuardian,
       cometaData: matchedCometaGuardian,
       matchStatus: matched ? "matched" : "only_partner",
       matchReason,
-      confidence: matched ? 1.0 : 0.0,
+      confidence: matched ? (studentMismatch ? 0.5 : 1.0) : 0.0,
+      studentMismatch, // Agregar flag para indicar discrepancia de estudiante
     })
   }
 
@@ -1126,6 +1273,7 @@ async function matchGuardians(
         matchStatus: "only_cometa",
         matchReason: null,
         confidence: 0.0,
+        studentMismatch: false,
       })
     }
   }
@@ -1134,6 +1282,11 @@ async function matchGuardians(
   console.log("[v0] Matched:", results.filter((r) => r.matchStatus === "matched").length)
   console.log("[v0] Only partner:", results.filter((r) => r.matchStatus === "only_partner").length)
   console.log("[v0] Only cometa:", results.filter((r) => r.matchStatus === "only_cometa").length)
+  
+  const mismatchCount = results.filter((r) => (r as any).studentMismatch === true).length
+  if (mismatchCount > 0) {
+    console.log(`[v0] ⚠️ ADVERTENCIA: ${mismatchCount} tutores emparejados pero asignados a diferentes estudiantes`)
+  }
 
   return results
 }
@@ -1211,11 +1364,127 @@ function normalizeDate(value: any): string {
 function normalizePhone(value: any): string {
   if (!value) return ""
   const str = String(value)
-  const cleaned = str.replace(/[^\d+]/g, "")
-  if (!cleaned.startsWith("+")) {
-    return `+52${cleaned}`
+  // Limpiar: solo dígitos
+  const digitsOnly = str.replace(/\D/g, "")
+  
+  // Quitar prefijos internacionales comunes (+52, +1, etc.)
+  let cleaned = digitsOnly
+  if (cleaned.startsWith("52") && cleaned.length > 10) {
+    cleaned = cleaned.substring(2) // Quitar +52
   }
-  return cleaned
+  if (cleaned.startsWith("1") && cleaned.length === 11) {
+    cleaned = cleaned.substring(1) // Quitar +1 (USA/Canada)
+  }
+  
+  // Devolver solo los últimos 10 dígitos (número local) para matching consistente
+  return cleaned.slice(-10)
+}
+
+export async function getGuardiansForSingleSchoolBatch(
+  tenantIntegrationId: string,
+  schoolId: string,
+  partner: string,
+  startIndex: number,
+  batchSize: number,
+  existingGuardiansMap: Record<string, any> = {},
+): Promise<{
+  success: boolean
+  guardians?: any[]
+  error?: string
+  totalStudents?: number
+  processedCount?: number
+  isComplete?: boolean
+}> {
+  try {
+    console.log(`[v0] 🔄 BATCH: Procesando lote ${Math.floor(startIndex / batchSize) + 1} desde índice ${startIndex}`)
+    
+    // Obtener estudiantes de la escuela
+    const studentsResult = await getStudents(tenantIntegrationId, schoolId)
+    if (!studentsResult.success || !studentsResult.students) {
+      console.error(`[v0] ❌ BATCH: Error obteniendo estudiantes`)
+      return {
+        success: false,
+        error: `Error obteniendo estudiantes de escuela ${schoolId}`,
+      }
+    }
+
+    const students = studentsResult.students
+    const totalStudents = students.length
+
+    if (startIndex === 0) {
+      console.log(`[v0] 📊 BATCH: Total de ${students.length} estudiantes, procesando en lotes de ${batchSize}`)
+    }
+
+    const guardiansMap = new Map<string, any>(Object.entries(existingGuardiansMap))
+    const DELAY_BETWEEN_REQUESTS_MS = 150 // Reducido para actualizaciones más rápidas
+
+    const endIndex = Math.min(startIndex + batchSize, totalStudents)
+    const studentsToProcess = students.slice(startIndex, endIndex)
+    
+    console.log(`[v0] 📦 BATCH: Procesando estudiantes ${startIndex + 1} a ${endIndex} de ${totalStudents}`)
+
+    // Obtener tutores de cada estudiante en este lote
+    for (let i = 0; i < studentsToProcess.length; i++) {
+      const student = studentsToProcess[i]
+      const studentId = student.id || student.student_id
+      const globalIndex = startIndex + i
+
+      if (i > 0) {
+        await delay(DELAY_BETWEEN_REQUESTS_MS)
+      }
+
+      const guardiansResult = await getGuardians(tenantIntegrationId, studentId, schoolId, partner)
+
+      if (guardiansResult.success && guardiansResult.guardians) {
+        for (const guardian of guardiansResult.guardians) {
+          const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
+          const studentInfo = {
+            student_id: studentId,
+            student_name: `${student.first_name || ""} ${student.last_name || ""}`.trim() || "-",
+            student_local_id: student.local_id || student.student_number || "-",
+          }
+          
+          if (guardianId) {
+            if (!guardiansMap.has(guardianId)) {
+              guardiansMap.set(guardianId, {
+                ...guardian,
+                students: [studentInfo], // Array de estudiantes
+                school_id: schoolId,
+              })
+            } else {
+              // Agregar este estudiante a la lista del tutor
+              const existingGuardian = guardiansMap.get(guardianId)
+              if (!existingGuardian.students.some((s: any) => s.student_id === studentId)) {
+                existingGuardian.students.push(studentInfo)
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const isComplete = endIndex >= totalStudents
+    const guardiansList = Array.from(guardiansMap.values())
+    
+    console.log(
+      `[v0] ✅ BATCH: Completado lote - ${endIndex}/${totalStudents} estudiantes (${guardiansList.length} tutores únicos acumulados)`,
+    )
+
+    // ⚠️ NO REDUCIR datos de PowerSchool - necesitamos preservar todos los campos para matching
+    return {
+      success: true,
+      guardians: guardiansList,
+      totalStudents,
+      processedCount: endIndex,
+      isComplete,
+    }
+  } catch (error) {
+    console.error(`[v0] ❌ BATCH: Error en lote:`, error)
+    return {
+      success: false,
+      error: `Error inesperado en escuela ${schoolId}`,
+    }
+  }
 }
 
 export async function getGuardiansForSingleSchool(
@@ -1246,6 +1515,11 @@ export async function getGuardiansForSingleSchool(
       const student = students[studentIndex]
       const studentId = student.id || student.student_id
 
+      // Log de progreso cada 10 estudiantes
+      if (studentIndex % 10 === 0 || studentIndex === students.length - 1) {
+        console.log(`[v0] Progreso escuela ${schoolId}: ${studentIndex + 1}/${students.length} estudiantes procesados`)
+      }
+
       if (studentIndex > 0) {
         await delay(DELAY_BETWEEN_REQUESTS_MS)
       }
@@ -1255,12 +1529,26 @@ export async function getGuardiansForSingleSchool(
       if (guardiansResult.success && guardiansResult.guardians) {
         for (const guardian of guardiansResult.guardians) {
           const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
-          if (guardianId && !guardiansMap.has(guardianId)) {
-            guardiansMap.set(guardianId, {
-              ...guardian,
-              student_id: studentId,
-              school_id: schoolId,
-            })
+          const studentInfo = {
+            student_id: studentId,
+            student_name: `${student.first_name || ""} ${student.last_name || ""}`.trim() || "-",
+            student_local_id: student.local_id || student.student_number || "-",
+          }
+          
+          if (guardianId) {
+            if (!guardiansMap.has(guardianId)) {
+              guardiansMap.set(guardianId, {
+                ...guardian,
+                students: [studentInfo], // Array de estudiantes
+                school_id: schoolId,
+              })
+            } else {
+              // Agregar este estudiante a la lista del tutor
+              const existingGuardian = guardiansMap.get(guardianId)
+              if (!existingGuardian.students.some((s: any) => s.student_id === studentId)) {
+                existingGuardian.students.push(studentInfo)
+              }
+            }
           }
         }
       }

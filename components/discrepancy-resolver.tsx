@@ -83,15 +83,26 @@ const compareStudentData = (partnerData: any, cometaData: any, dataType: "studen
       }
     }
 
-    // Comparar teléfono
-    const normalizePhone = (phone: string) => phone.replace(/[\s\-$$$$]/g, "")
-    const partnerPhone = normalizePhone(partnerData.phones || "")
-    const cometaPhone = normalizePhone(cometaData.phone || "")
+    // Comparar teléfono (normalizado correctamente)
+    const normalizePhoneForComparison = (phone: string) => {
+      return phone.replace(/\D/g, "").slice(-10) // Solo últimos 10 dígitos
+    }
+    const formatPhoneWithCountryCode = (phone: string) => {
+      if (!phone || phone === "-") return "-"
+      const digitsOnly = phone.replace(/\D/g, "")
+      const last10 = digitsOnly.slice(-10)
+      return last10 ? `+52${last10}` : phone
+    }
+    const partnerPhoneRaw = partnerData.phones || ""
+    const cometaPhoneRaw = cometaData.phone || ""
+    const partnerPhone = normalizePhoneForComparison(partnerPhoneRaw)
+    const cometaPhone = normalizePhoneForComparison(cometaPhoneRaw)
     if (partnerPhone && cometaPhone && partnerPhone !== cometaPhone) {
+      // Solo agregar discrepancia si los números realmente difieren después de normalizar
       discrepancies.telefono = {
         field: "telefono",
-        partner: partnerData.phones || "-",
-        cometa: cometaData.phone || "-",
+        partner: formatPhoneWithCountryCode(partnerPhoneRaw),
+        cometa: formatPhoneWithCountryCode(cometaPhoneRaw),
       }
     }
   } else {
@@ -242,7 +253,11 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
     setResolvedStudents(newResolved)
     setSelectedOption(null)
 
-    handleNextField()
+    // Si es el último campo, no resetear fieldResolution para que se muestre el botón de descarga
+    // Si no es el último campo, avanzar al siguiente campo
+    if (currentFieldIndex < fieldDiscrepancies.length - 1) {
+      handleNextField()
+    }
   }
 
   const handleReviewManually = () => {
@@ -353,20 +368,28 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
         const partnerData = student.partnerData || {}
         const cometaData = student.cometaData || {}
 
-        // Datos base del estudiante
+        // Datos base (columnas varían según tipo de entidad)
         const row: any = {
           ID: partnerData.id || cometaData.id || "",
-          "Nombre Completo": `${partnerData.first_name || cometaData.first_name || ""} ${
-            partnerData.last_name || cometaData.last_name || ""
-          }`.trim(),
-          "Matrícula (Local ID)": partnerData.local_id || cometaData.enrollment_code || "",
-          CURP: "",
-          "Fecha de Nacimiento": "",
-          Género: "",
-          Grado: "",
-          "Campos Modificados": "",
-          "Fuente de Datos": "",
+          Nombre: partnerData.first_name || partnerData.firstName || cometaData.first_name || "",
+          Apellido: partnerData.last_name || partnerData.lastName || cometaData.last_name || "",
+          "ID Escuela PowerSchool": partnerData.school_id || "",
         }
+
+        // Agregar columnas específicas según el tipo de entidad
+        if (dataType === "guardians") {
+          row.Email = ""
+          row.Teléfono = ""
+        } else {
+          row["Matrícula (Local ID)"] = partnerData.local_id || cometaData.enrollment_code || ""
+          row.CURP = ""
+          row["Fecha de Nacimiento"] = ""
+          row.Género = ""
+          row.Grado = ""
+        }
+
+        row["Campos Modificados"] = ""
+        row["Fuente de Datos"] = ""
 
         const modifiedFields: string[] = []
         const sources: string[] = []
@@ -380,7 +403,16 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
 
           // Asignar el valor resuelto al campo correspondiente
           if (field.field === "nombre") {
-            row["Nombre Completo"] = field.value
+            // Intentar separar nombre completo en nombre y apellido
+            const nameParts = field.value.trim().split(" ")
+            if (nameParts.length >= 2) {
+              // Asumimos que la primera palabra es el nombre y el resto es el apellido
+              row.Nombre = nameParts[0]
+              row.Apellido = nameParts.slice(1).join(" ")
+            } else {
+              row.Nombre = field.value
+              row.Apellido = ""
+            }
           } else if (field.field === "curp") {
             row.CURP = field.value
           } else if (field.field === "fecha_nacimiento") {
@@ -397,26 +429,31 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
         })
 
         // Rellenar campos que no fueron modificados con valores por defecto
-        if (!row.CURP) {
-          row.CURP = partnerData.curp || partnerData.state_studentnumber || cometaData.identifier || ""
-        }
-        if (!row["Fecha de Nacimiento"]) {
-          row["Fecha de Nacimiento"] =
-            normalizeDateForComparison(partnerData.dob || partnerData.birthdate || "") ||
-            normalizeDateForComparison(cometaData.birthdate || "")
-        }
-        if (!row.Género) {
-          row.Género = partnerData.gender || cometaData.gender || ""
-        }
-        if (!row.Grado) {
-          row.Grado =
-            partnerData.grade_level || partnerData.grade || partnerData.gradelevel || partnerData.current_grade || ""
-        }
-        if (!row.Email && dataType === "guardians") {
-          row.Email = partnerData.emails || cometaData.email || ""
-        }
-        if (!row.Teléfono && dataType === "guardians") {
-          row.Teléfono = partnerData.phones || cometaData.phone || ""
+        if (dataType === "guardians") {
+          // Campos específicos para tutores
+          if (!row.Email) {
+            row.Email = partnerData.emails || cometaData.email || ""
+          }
+          if (!row.Teléfono) {
+            row.Teléfono = partnerData.phones || cometaData.phone || ""
+          }
+        } else {
+          // Campos específicos para estudiantes
+          if (!row.CURP) {
+            row.CURP = partnerData.curp || partnerData.state_studentnumber || cometaData.identifier || ""
+          }
+          if (!row["Fecha de Nacimiento"]) {
+            row["Fecha de Nacimiento"] =
+              normalizeDateForComparison(partnerData.dob || partnerData.birthdate || "") ||
+              normalizeDateForComparison(cometaData.birthdate || "")
+          }
+          if (!row.Género) {
+            row.Género = partnerData.gender || cometaData.gender || ""
+          }
+          if (!row.Grado) {
+            row.Grado =
+              partnerData.grade_level || partnerData.grade || partnerData.gradelevel || partnerData.current_grade || ""
+          }
         }
 
         row["Campos Modificados"] = modifiedFields.join(", ")
@@ -425,10 +462,13 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
         return row
       })
 
+      const entityLabel = dataType === "guardians" ? "tutores" : "estudiantes"
+      const entityLabelCapitalized = dataType === "guardians" ? "Tutores" : "Estudiantes"
+      
       console.log(
         "[v0] Datos consolidados preparados:",
         studentsWithDiscrepancies.length,
-        "estudiantes con discrepancias resueltas",
+        `${entityLabel} con discrepancias resueltas`,
       )
 
       // Crear libro de Excel con múltiples hojas
@@ -436,17 +476,17 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
 
       // Hoja 1: Datos consolidados
       const ws1 = XLSX.utils.json_to_sheet(studentsWithDiscrepancies)
-      XLSX.utils.book_append_sheet(wb, ws1, "Estudiantes Consolidados")
+      XLSX.utils.book_append_sheet(wb, ws1, `${entityLabelCapitalized} Consolidados`)
 
       // Hoja 2: Resumen de cambios
       const changesData = resolvedStudents.flatMap((resolved) => {
         const student = resolved.originalData
-        const studentName = `${student.partnerData?.first_name || student.cometaData?.first_name || ""} ${
-          student.partnerData?.last_name || student.cometaData?.last_name || ""
-        }`.trim()
+        const firstName = student.partnerData?.first_name || student.cometaData?.first_name || ""
+        const lastName = student.partnerData?.last_name || student.cometaData?.last_name || ""
 
         return resolved.resolvedFields.map((field) => ({
-          Estudiante: studentName,
+          Nombre: firstName,
+          Apellido: lastName,
           "ID Estudiante": resolved.studentId,
           Campo: field.field.replace("_", " ").replace(/\b\w/g, (l) => l.toUpperCase()),
           "Valor Final": field.value,
@@ -471,7 +511,8 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
       const url = URL.createObjectURL(blob)
       const link = document.createElement("a")
       link.href = url
-      link.download = `estudiantes-discrepancias-resueltas-${new Date().toISOString().split("T")[0]}.xlsx`
+      const entityType = dataType === "guardians" ? "tutores" : "estudiantes"
+      link.download = `${entityType}-discrepancias-resueltas-${new Date().toISOString().split("T")[0]}.xlsx`
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)
@@ -517,7 +558,14 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
     }
 
     setResolvedStudents(newResolved)
-    handleNextField()
+    
+    // Si es el último campo, mover al último estudiante para mostrar el botón de descarga
+    if (currentFieldIndex === fieldDiscrepancies.length - 1) {
+      setCurrentStudentIndex(currentField.discrepancies.length - 1)
+    } else {
+      // Si no es el último campo, avanzar al siguiente campo
+      handleNextField()
+    }
   }
 
   const handleSelectOption = (option: "partner" | "cometa" | "manual") => {
