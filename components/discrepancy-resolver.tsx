@@ -198,11 +198,38 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
         })
       }
 
+      // Construir nombre según el tipo de entidad
+      let entityName = ""
+      if (dataType === "guardians") {
+        // Para tutores, mostrar nombre del tutor + estudiantes asociados
+        const guardianName = `${student.partnerData?.firstName || student.partnerData?.first_name || student.cometaData?.first_name || ""} ${
+          student.partnerData?.lastName || student.partnerData?.last_name || student.cometaData?.last_name || ""
+        }`.trim()
+        
+        // Obtener nombres de estudiantes asociados
+        const studentsInfo = student.partnerData?.students || student.cometaData?.students || []
+        const studentNames = studentsInfo.map((s: any) => s.student_name).filter(Boolean)
+        
+        entityName = guardianName
+        if (studentNames.length > 0) {
+          // Limitar a máximo 2 estudiantes en el display, con indicador si hay más
+          const displayNames = studentNames.slice(0, 2).join(", ")
+          const remaining = studentNames.length - 2
+          entityName += ` — Estudiante${studentNames.length > 1 ? 's' : ''}: ${displayNames}`
+          if (remaining > 0) {
+            entityName += ` (+${remaining} más)`
+          }
+        }
+      } else {
+        // Para estudiantes, solo mostrar nombre del estudiante
+        entityName = `${student.partnerData?.first_name || student.cometaData?.first_name || ""} ${
+          student.partnerData?.last_name || student.cometaData?.last_name || ""
+        }`.trim()
+      }
+
       fieldDiscrepanciesMap.get(disc.field)!.discrepancies.push({
         studentId: student.partnerData?.id || student.cometaData?.id || "",
-        studentName: `${student.partnerData?.first_name || student.cometaData?.first_name || ""} ${
-          student.partnerData?.last_name || student.cometaData?.last_name || ""
-        }`.trim(),
+        studentName: entityName,
         partnerValue: disc.partner,
         cometaValue: disc.cometa,
         student,
@@ -799,7 +826,7 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
                 Revisión Manual: {currentField.fieldLabel}
               </CardTitle>
               <CardDescription className="text-neutral-600">
-                Estudiante {currentStudentIndex + 1} de {currentField.discrepancies.length}
+                {dataType === "guardians" ? "Tutor" : "Estudiante"} {currentStudentIndex + 1} de {currentField.discrepancies.length}
               </CardDescription>
             </div>
             <Badge variant="secondary" className="bg-horizon-50 text-horizon-700 border-horizon-200">
@@ -811,8 +838,10 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
 
         <CardContent className="space-y-6">
           <div className="p-4 bg-neutral-50 rounded-lg border border-neutral-200">
-            <h4 className="font-semibold text-neutral-900 mb-2">{currentDiscrepancy.studentName}</h4>
-            <p className="text-sm text-neutral-600">Selecciona el valor correcto para {currentField.fieldLabel}</p>
+            <h4 className="font-semibold text-neutral-900 mb-2 text-lg">{currentDiscrepancy.studentName}</h4>
+            <p className="text-sm text-neutral-600">
+              Selecciona el valor correcto para <span className="font-semibold">{currentField.fieldLabel}</span>
+            </p>
           </div>
 
           <div className="grid md:grid-cols-3 gap-4">
