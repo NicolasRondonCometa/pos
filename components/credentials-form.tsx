@@ -263,7 +263,7 @@ export function CredentialsForm() {
         setLoadingMessage("Iniciando carga de tutores de PowerSchool...")
 
         try {
-          const allGuardians: any[] = []
+          const allGuardiansMap = new Map<string, any>()
           const totalSchools = selectedSchools.length
           const BATCH_SIZE = 50 // Procesar 50 estudiantes por lote para eficiencia
           const MAX_STUDENTS_FOR_TEST = 999999 // Sin límite - procesar todos los estudiantes
@@ -300,7 +300,7 @@ export function CredentialsForm() {
               totalSchools,
               currentStudent: 0,
               totalStudents: 1, // Se actualizará con el valor real
-              totalGuardians: allGuardians.length,
+              totalGuardians: allGuardiansMap.size,
               isLoadingComplete: false,
             })
             
@@ -316,7 +316,7 @@ export function CredentialsForm() {
                   totalSchools,
                   currentStudent: startIndex,
                   totalStudents: totalStudentsKnown,
-                  totalGuardians: allGuardians.length + Object.keys(guardiansMapForSchool).length,
+                  totalGuardians: allGuardiansMap.size + Object.keys(guardiansMapForSchool).length,
                   isLoadingComplete: false,
                 })
               }
@@ -374,7 +374,7 @@ export function CredentialsForm() {
               if (totalStudentsKnown === 0) {
                 totalStudentsKnown = totalStudents
               }
-
+              
               // Actualizar progreso con datos reales
               setGuardiansProgress({
                 currentSchool: schoolId,
@@ -383,7 +383,7 @@ export function CredentialsForm() {
                 totalSchools,
                 currentStudent: processedCount,
                 totalStudents: totalStudentsKnown, // Total real de estudiantes
-                totalGuardians: allGuardians.length + Object.keys(guardiansMapForSchool).length,
+                totalGuardians: allGuardiansMap.size + Object.keys(guardiansMapForSchool).length,
                 isLoadingComplete: false,
               })
 
@@ -407,24 +407,47 @@ export function CredentialsForm() {
               }
             }
 
-            // Al completar la escuela, agregar todos los tutores únicos
-            const schoolGuardians = Object.values(guardiansMapForSchool)
-            allGuardians.push(...schoolGuardians)
-            setPowerschoolData([...allGuardians])
+            // Al completar la escuela, agregar todos los tutores únicos al mapa global
+            Object.values(guardiansMapForSchool).forEach((guardian: any) => {
+              const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
+              if (guardianId) {
+                if (allGuardiansMap.has(guardianId)) {
+                  // Merge existing guardian with new students
+                  const existingGuardian = allGuardiansMap.get(guardianId)
+                  const existingStudents = existingGuardian.students || []
+                  const newStudents = guardian.students || []
+                  
+                  // Add new students avoiding duplicates
+                  newStudents.forEach((newS: any) => {
+                    if (!existingStudents.some((exS: any) => exS.student_id === newS.student_id)) {
+                      existingStudents.push(newS)
+                    }
+                  })
+                  
+                  existingGuardian.students = existingStudents
+                  allGuardiansMap.set(guardianId, existingGuardian)
+                } else {
+                  allGuardiansMap.set(guardianId, guardian)
+                }
+              }
+            })
+            
+            const currentAllGuardians = Array.from(allGuardiansMap.values())
+            setPowerschoolData([...currentAllGuardians])
 
             const endTime = Date.now()
             const durationSeconds = Math.round((endTime - startTime) / 1000)
 
             console.log(
-              `[v0] [${i + 1}/${totalSchools}] ${schoolName}: ${schoolGuardians.length} tutores (total acumulado: ${allGuardians.length})`,
+              `[v0] [${i + 1}/${totalSchools}] ${schoolName}: ${Object.keys(guardiansMapForSchool).length} tutores (total acumulado: ${currentAllGuardians.length})`,
             )
 
             setLoadingMessage(
               `✅ Escuela ${i + 1}/${totalSchools} completada: ${schoolName}\n\n` +
                 `👥 Todos los estudiantes procesados\n` +
-                `👨‍👩‍👧 ${schoolGuardians.length} tutores únicos encontrados\n` +
+                `👨‍👩‍👧 ${Object.keys(guardiansMapForSchool).length} tutores únicos encontrados\n` +
                 `⏱️ Tiempo: ${durationSeconds}s\n` +
-                `📊 Total acumulado: ${allGuardians.length} tutores`,
+                `📊 Total acumulado: ${currentAllGuardians.length} tutores`,
             )
 
             // Dar un momento para que el usuario vea el mensaje de completado
@@ -433,6 +456,7 @@ export function CredentialsForm() {
             }
           }
 
+          const allGuardians = Array.from(allGuardiansMap.values())
           setIsLoadingPowerschool(false)
           setGuardiansProgress(null)
           setPowerschoolData(allGuardians)
