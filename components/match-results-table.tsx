@@ -1,11 +1,12 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import * as XLSX from "xlsx"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Search, ChevronLeft, ChevronRight, CheckCircle2, AlertCircle, XCircle, AlertTriangle } from "lucide-react"
+import { Search, ChevronLeft, ChevronRight, CheckCircle2, AlertCircle, XCircle, AlertTriangle, Download } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -344,6 +345,64 @@ const compareStudentGuardians = (partnerData: any, cometaData: any) => {
   return { hasDiscrepancy: false, details: null }
 }
 
+const getGuardianStudentDiscrepancy = (partnerData: any, cometaData: any): { hasDiscrepancy: boolean; reason: string | null } => {
+  if (!partnerData || !cometaData) return { hasDiscrepancy: false, reason: null }
+
+  const partnerStudents = partnerData.students || 
+    (partnerData.student_id ? [{
+      student_id: partnerData.student_id,
+      student_name: partnerData.student_name
+    }] : [])
+  
+  const cometaStudents = cometaData.students || 
+    (cometaData.student_id ? [{
+      student_id: cometaData.student_id,
+      student_name: cometaData.student_name
+    }] : [])
+
+  if (partnerStudents.length === 0 && cometaStudents.length === 0) return { hasDiscrepancy: false, reason: null }
+  
+  // Normalizamos nombres para comparación
+  const normalizeName = (name: string) => {
+    return (name || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  const partnerNames = partnerStudents.map((s: any) => normalizeName(s.student_name)).sort()
+  const cometaNames = cometaStudents.map((s: any) => normalizeName(s.student_name)).sort()
+
+  // 1. Verificar cantidad
+  if (partnerStudents.length !== cometaStudents.length) {
+    return { 
+      hasDiscrepancy: true, 
+      reason: `Cantidad diferente: PowerSchool (${partnerStudents.length}) vs Cometa (${cometaStudents.length})` 
+    }
+  }
+
+  // 2. Verificar nombres exactos (sets iguales)
+  const areEqual = JSON.stringify(partnerNames) === JSON.stringify(cometaNames)
+  
+  if (!areEqual) {
+     const inPSnotCometa = partnerNames.filter((n: string) => !cometaNames.includes(n))
+     const inCometaNotPS = cometaNames.filter((n: string) => !partnerNames.includes(n))
+     
+     let details = []
+     if (inPSnotCometa.length > 0) details.push(`Solo en PS: ${inPSnotCometa.slice(0, 2).join(", ")}${inPSnotCometa.length > 2 ? "..." : ""}`)
+     if (inCometaNotPS.length > 0) details.push(`Solo en Cometa: ${inCometaNotPS.slice(0, 2).join(", ")}${inCometaNotPS.length > 2 ? "..." : ""}`)
+     
+     return {
+       hasDiscrepancy: true,
+       reason: `Estudiantes diferentes. ${details.join(". ")}`
+     }
+  }
+
+  return { hasDiscrepancy: false, reason: null }
+}
+
 export function MatchResultsTable({ results, dataType = "students" }: MatchResultsTableProps) {
   const [searchTerm, setSearchTerm] = useState("")
   const [currentPage, setCurrentPage] = useState(1)
@@ -362,14 +421,21 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
         ? compareStudentGuardians(result.partnerData, result.cometaData)
         : { hasDiscrepancy: false, details: null }
 
+      // Para tutores, verificar discrepancias en estudiantes asignados
+      const guardianStudentDiscrepancy = dataType === "guardians"
+        ? getGuardianStudentDiscrepancy(result.partnerData, result.cometaData)
+        : { hasDiscrepancy: false, reason: null }
+
       const fieldDiscrepanciesCount = Object.keys(discrepancies).length
-      const totalDiscrepanciesCount = fieldDiscrepanciesCount + (guardianComparison.hasDiscrepancy ? 1 : 0)
+      const totalDiscrepanciesCount = fieldDiscrepanciesCount + (guardianComparison.hasDiscrepancy ? 1 : 0) + (guardianStudentDiscrepancy.hasDiscrepancy ? 1 : 0)
 
       return {
         ...result,
         hasDiscrepancies: totalDiscrepanciesCount > 0,
         discrepanciesCount: totalDiscrepanciesCount,
         hasGuardianDiscrepancy: guardianComparison.hasDiscrepancy,
+        studentMismatch: guardianStudentDiscrepancy.hasDiscrepancy,
+        studentMismatchReason: guardianStudentDiscrepancy.reason,
       }
     })
   }, [results, dataType])
@@ -426,6 +492,142 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
     setCurrentPage(1)
   }
 
+  const handleDownloadExcel = () => {
+    console.log("[v0] Descargando Excel con filtro:", statusFilter)
+    
+    // Preparar datos para Excel
+    const dataToExport = filteredResults.map((result) => {
+      const isOnlyCometa = result.matchStatus === "only_cometa"
+      const isOnlyPartner = result.matchStatus === "only_partner"
+      const isMatched = result.matchStatus === "matched"
+      
+      // Determinar qué datos usar según el status
+      const sourceData = isOnlyCometa 
+        ? result.cometaData 
+        : isOnlyPartner 
+          ? result.partnerData 
+          : result.partnerData || result.cometaData // Para matched, preferir PowerSchool
+      
+      if (dataType === "students") {
+        return {
+          "Estado": STATUS_CONFIG[result.matchStatus]?.label || result.matchStatus,
+          "Nombre": sourceData?.first_name || "",
+          "Apellido": sourceData?.last_name || "",
+          "ID PowerSchool": result.partnerData?.id || "-",
+          "ID Cometa": result.cometaData?.id || "-",
+          "Matrícula": sourceData?.local_id || sourceData?.enrollment_code || "",
+          "CURP": sourceData?.curp || "",
+          "Fecha Nacimiento": sourceData?.dob || "",
+          "Género": sourceData?.gender || "",
+          "Grado": sourceData?.grade || "",
+          "Grupo": sourceData?.section ? formatSection(sourceData.section) : "",
+          "Email": sourceData?.email || "",
+          "ID Escuela": sourceData?.school_id || "",
+          "Razón de Matching": result.matchReason || "",
+          "Tiene Discrepancias": result.hasDiscrepancies ? "Sí" : "No",
+        }
+      } else {
+        // Para guardians/tutores
+        const partnerStudents = result.partnerData?.students || 
+          (result.partnerData?.student_id ? [{ student_name: result.partnerData.student_name }] : [])
+        
+        const cometaStudents = result.cometaData?.students || 
+          (result.cometaData?.student_id ? [{ student_name: result.cometaData.student_name }] : [])
+
+        return {
+          "Estado": STATUS_CONFIG[result.matchStatus]?.label || result.matchStatus,
+          "Nombre": sourceData?.firstName || sourceData?.first_name || "",
+          "Apellido": sourceData?.lastName || sourceData?.last_name || "",
+          "ID PowerSchool": result.partnerData?.id || "-",
+          "ID Cometa": result.cometaData?.id || "-",
+          "Email": sourceData?.email || "",
+          "Teléfono": sourceData?.phone || "",
+          "Relación": sourceData?.relationship || "",
+          "Estudiantes PowerSchool": partnerStudents.map((s: any) => s.student_name || "").join(", "),
+          "Estudiantes Cometa": cometaStudents.map((s: any) => s.student_name || "").join(", "),
+          "Discrepancia Estudiantes": (result as any).studentMismatch ? "Sí" : "No",
+          "Razón de Matching": result.matchReason || "",
+          "Tiene Discrepancias": result.hasDiscrepancies ? "Sí" : "No",
+        }
+      }
+    })
+    
+    // Crear worksheet
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport)
+    
+    // Ajustar anchos de columna
+    const columnWidths = Object.keys(dataToExport[0] || {}).map(key => ({
+      wch: Math.max(key.length, 15)
+    }))
+    worksheet['!cols'] = columnWidths
+    
+    // Crear workbook
+    const workbook = XLSX.utils.book_new()
+    const sheetName = dataType === "students" ? "Estudiantes" : "Tutores"
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName)
+    
+    // Determinar nombre de archivo según filtro
+    const filterLabel = statusFilter === "only_cometa" 
+      ? "solo-cometa"
+      : statusFilter === "only_partner"
+        ? "solo-powerschool"
+        : statusFilter === "matched"
+          ? "emparejados"
+          : statusFilter === "with_discrepancies"
+            ? "con-discrepancias"
+            : "todos"
+    
+    const entityType = dataType === "students" ? "estudiantes" : "tutores"
+    const today = new Date().toISOString().split('T')[0]
+    const fileName = `${entityType}-${filterLabel}-${today}.xlsx`
+    
+    // Descargar archivo
+    XLSX.writeFile(workbook, fileName)
+    
+    console.log(`[v0] ✅ Descargado ${dataToExport.length} registros en ${fileName}`)
+  }
+
+  const handleDownloadMismatch = () => {
+    const mismatchResults = resultsWithDiscrepancies.filter((r) => (r as any).studentMismatch === true)
+    
+    if (mismatchResults.length === 0) return
+
+    const dataToExport = mismatchResults.map((result) => {
+      const sourceData = result.partnerData || result.cometaData
+      const partnerStudents = result.partnerData?.students || 
+        (result.partnerData?.student_id ? [{ student_name: result.partnerData.student_name }] : [])
+      
+      const cometaStudents = result.cometaData?.students || 
+        (result.cometaData?.student_id ? [{ student_name: result.cometaData.student_name }] : [])
+
+      return {
+        "Estado": STATUS_CONFIG[result.matchStatus]?.label || result.matchStatus,
+        "Nombre": sourceData?.firstName || sourceData?.first_name || "",
+        "Apellido": sourceData?.lastName || sourceData?.last_name || "",
+        "ID PowerSchool": result.partnerData?.id || "-",
+        "ID Cometa": result.cometaData?.id || "-",
+        "Email": sourceData?.email || "",
+        "Teléfono": sourceData?.phone || "",
+        "Estudiantes PowerSchool": partnerStudents.map((s: any) => s.student_name || "").join(", "),
+        "Estudiantes Cometa": cometaStudents.map((s: any) => s.student_name || "").join(", "),
+        "Motivo de Diferencia": (result as any).studentMismatchReason || "Estudiantes no coinciden",
+        "Razón de Matching": result.matchReason || "",
+      }
+    })
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport)
+    const columnWidths = Object.keys(dataToExport[0] || {}).map(key => ({
+      wch: Math.max(key.length, 25)
+    }))
+    worksheet['!cols'] = columnWidths
+    
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Tutores con Diferencias")
+    
+    const today = new Date().toISOString().split('T')[0]
+    XLSX.writeFile(workbook, `tutores-diferencias-estudiantes-${today}.xlsx`)
+  }
+
   const stats = useMemo(() => {
     return {
       matched: resultsWithDiscrepancies.filter((r) => r.matchStatus === "matched").length,
@@ -474,12 +676,39 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                 Comparación entre estudiantes de PowerSchool y Cometa
               </CardDescription>
             </div>
-            <Badge
-              variant="secondary"
-              className="bg-galaxy-50 text-galaxy-700 border-galaxy-200 px-3 py-1.5 text-sm font-semibold"
-            >
-              {filteredResults.length} resultados
-            </Badge>
+            <div className="flex items-center gap-3">
+              <Badge
+                variant="secondary"
+                className="bg-galaxy-50 text-galaxy-700 border-galaxy-200 px-3 py-1.5 text-sm font-semibold"
+              >
+                {filteredResults.length} resultados
+              </Badge>
+              
+              {filteredResults.length > 0 && (
+                <div className="flex gap-2">
+                  {dataType === "guardians" && stats.student_mismatch > 0 && (
+                    <Button
+                      onClick={handleDownloadMismatch}
+                      variant="outline"
+                      size="sm"
+                      className="border-red-300 bg-red-50 hover:bg-red-100 text-red-700"
+                    >
+                      <Download className="h-4 w-4 mr-2" />
+                      Descargar Diferencias
+                    </Button>
+                  )}
+                  <Button
+                    onClick={handleDownloadExcel}
+                    variant="outline"
+                    size="sm"
+                    className="border-galaxy-300 hover:bg-galaxy-50 text-galaxy-700"
+                  >
+                    <Download className="h-4 w-4 mr-2" />
+                    Descargar Excel
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mt-4">
@@ -1131,7 +1360,61 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                     return ""
                   }
 
-                  // Extraer apellidos de todos los estudiantes
+                  // Preparar datos unificados para comparación
+                  const allStudentsMap = new Map<string, { 
+                    name: string, 
+                    normalizedName: string,
+                    psData?: any, 
+                    cmData?: any 
+                  }>()
+
+                  // Procesar PowerSchool
+                  psStudents.forEach((student: any) => {
+                    const name = student.student_name || "-"
+                    const normalized = normalizeForComparison(name)
+                    // Usar ID o nombre normalizado como clave
+                    const key = student.student_id || normalized
+                    
+                    if (!allStudentsMap.has(key)) {
+                      allStudentsMap.set(key, { name, normalizedName: normalized, psData: student })
+                    } else {
+                      const entry = allStudentsMap.get(key)!
+                      entry.psData = student
+                    }
+                  })
+
+                  // Procesar Cometa y buscar matches
+                  cmStudents.forEach((student: any) => {
+                    const name = student.student_name || "-"
+                    const normalized = normalizeForComparison(name)
+                    
+                    // Intentar encontrar match por nombre normalizado
+                    let foundKey: string | undefined
+                    for (const [key, entry] of allStudentsMap.entries()) {
+                      if (entry.normalizedName === normalized && !entry.cmData) {
+                        foundKey = key
+                        break
+                      }
+                    }
+
+                    if (foundKey) {
+                      const entry = allStudentsMap.get(foundKey)!
+                      entry.cmData = student
+                    } else {
+                      // Si no hay match, crear nueva entrada
+                      const key = `cm_${student.student_id || normalized}`
+                      allStudentsMap.set(key, { name, normalizedName: normalized, cmData: student })
+                    }
+                  })
+
+                  const allStudents = Array.from(allStudentsMap.values())
+                  
+                  // Clasificar estudiantes
+                  const matchedStudents = allStudents.filter(s => s.psData && s.cmData)
+                  const onlyPsStudents = allStudents.filter(s => s.psData && !s.cmData)
+                  const onlyCmStudents = allStudents.filter(s => !s.psData && s.cmData)
+
+                  // Extraer apellidos de todos los estudiantes para verificación de familia
                   const psLastNamesList = psStudents.map((s: any) => 
                     normalizeForComparison(extractLastNames(s.student_name || ""))
                   ).filter(Boolean)
@@ -1161,7 +1444,7 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                             <AlertCircle className="h-5 w-5 text-blue-600" />
                           )}
                           <CardTitle className={`text-lg font-lota ${mismatch ? "text-red-900" : sameFamily ? "text-green-900" : "text-blue-900"}`}>
-                            Estudiantes Asociados ({psStudents.length + cmStudents.length} total)
+                            Estudiantes Asociados ({allStudents.length} total)
                           </CardTitle>
                         </div>
                         <CardDescription className={mismatch ? "text-red-700" : sameFamily ? "text-green-700" : "text-blue-700"}>
@@ -1172,57 +1455,61 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                               : "Información de los estudiantes asociados a este tutor"}
                         </CardDescription>
                       </CardHeader>
-                      <CardContent className="pt-4 space-y-3">
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="p-4 bg-white rounded-lg border border-galaxy-200">
-                            <p className="text-xs text-galaxy-600 font-medium mb-3">
-                              PowerSchool ({psStudents.length} estudiante{psStudents.length !== 1 ? "s" : ""})
-                            </p>
-                            <div className="space-y-3">
-                              {psStudents.length > 0 ? psStudents.map((student: any, idx: number) => (
-                                <div key={idx} className="pb-3 border-b border-galaxy-100 last:border-0">
-                                  <p className="text-sm font-semibold text-neutral-900 mb-1">
-                                    {student.student_name || "-"}
-                                  </p>
-                                  <p className="text-xs text-neutral-600 font-mono">
-                                    ID: {student.student_id || "-"}
-                                  </p>
-                                  {student.student_local_id && student.student_local_id !== "-" && (
-                                    <p className="text-xs text-neutral-600 font-mono">
-                                      Mat: {student.student_local_id}
-                                    </p>
-                                  )}
-                                </div>
-                              )) : (
-                                <p className="text-xs text-neutral-500 italic">Sin estudiantes</p>
-                              )}
-                            </div>
-                          </div>
-                          <div className="p-4 bg-white rounded-lg border border-aurora-200">
-                            <p className="text-xs text-aurora-600 font-medium mb-3">
-                              Cometa ({cmStudents.length} estudiante{cmStudents.length !== 1 ? "s" : ""})
-                            </p>
-                            <div className="space-y-3">
-                              {cmStudents.length > 0 ? cmStudents.map((student: any, idx: number) => (
-                                <div key={idx} className="pb-3 border-b border-aurora-100 last:border-0">
-                                  <p className="text-sm font-semibold text-neutral-900 mb-1">
-                                    {student.student_name || "-"}
-                                  </p>
-                                  <p className="text-xs text-neutral-600 font-mono">
-                                    ID: {student.student_id || "-"}
-                                  </p>
-                                  {student.student_identifier && student.student_identifier !== "-" && (
-                                    <p className="text-xs text-neutral-600 font-mono">
-                                      ID: {student.student_identifier}
-                                    </p>
-                                  )}
-                                </div>
-                              )) : (
-                                <p className="text-xs text-neutral-500 italic">Sin estudiantes</p>
-                              )}
-                            </div>
-                          </div>
+                      <CardContent className="pt-4 space-y-4">
+                        
+                        {/* Tabla comparativa de estudiantes */}
+                        <div className="border border-neutral-200 rounded-lg overflow-hidden bg-white">
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="bg-neutral-50 hover:bg-neutral-50">
+                                <TableHead className="w-[40%]">Estudiante</TableHead>
+                                <TableHead className="w-[30%] text-center">PowerSchool</TableHead>
+                                <TableHead className="w-[30%] text-center">Cometa</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {allStudents.map((student, idx) => {
+                                const isMatched = student.psData && student.cmData
+                                const isOnlyPs = student.psData && !student.cmData
+                                const isOnlyCm = !student.psData && student.cmData
+                                
+                                return (
+                                  <TableRow key={idx} className={isMatched ? "bg-green-50/30" : isOnlyPs ? "bg-galaxy-50/30" : "bg-aurora-50/30"}>
+                                    <TableCell className="font-medium">
+                                      {student.name}
+                                      {isMatched && <span className="ml-2 text-xs text-green-600 font-normal">(Coincide)</span>}
+                                    </TableCell>
+                                    <TableCell className="text-center">
+                                      {student.psData ? (
+                                        <div className="flex flex-col items-center">
+                                          <Badge variant="outline" className="bg-galaxy-50 text-galaxy-700 border-galaxy-200 mb-1">
+                                            Presente
+                                          </Badge>
+                                          <span className="text-xs text-neutral-500 font-mono">ID: {student.psData.student_id}</span>
+                                        </div>
+                                      ) : (
+                                        <span className="text-neutral-400">-</span>
+                                      )}
+                                    </TableCell>
+                                    <TableCell className="text-center">
+                                      {student.cmData ? (
+                                        <div className="flex flex-col items-center">
+                                          <Badge variant="outline" className="bg-aurora-50 text-aurora-700 border-aurora-200 mb-1">
+                                            Presente
+                                          </Badge>
+                                          <span className="text-xs text-neutral-500 font-mono">ID: {String(student.cmData.student_id).substring(0, 8)}...</span>
+                                        </div>
+                                      ) : (
+                                        <span className="text-neutral-400">-</span>
+                                      )}
+                                    </TableCell>
+                                  </TableRow>
+                                )
+                              })}
+                            </TableBody>
+                          </Table>
                         </div>
+
                         {mismatch && (
                           <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
                             <p className="text-xs text-red-700">
