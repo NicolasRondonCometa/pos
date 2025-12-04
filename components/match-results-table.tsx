@@ -1457,91 +1457,142 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                       </CardHeader>
                       <CardContent className="pt-4 space-y-4">
                         
-                        {/* Tabla comparativa de estudiantes */}
-                        <div className="border border-neutral-200 rounded-lg overflow-hidden bg-white">
-                          <Table>
-                            <TableHeader>
-                              <TableRow className="bg-neutral-50 hover:bg-neutral-50">
-                                <TableHead className="w-[40%]">Estudiante</TableHead>
-                                <TableHead className="w-[30%] text-center">PowerSchool</TableHead>
-                                <TableHead className="w-[30%] text-center">Cometa</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {allStudents.map((student, idx) => {
-                                const isMatched = student.psData && student.cmData
-                                const isOnlyPs = student.psData && !student.cmData
-                                const isOnlyCm = !student.psData && student.cmData
-                                
-                                // Obtener IDs para mostrar
-                                const psId = student.psData?.student_id || student.psData?.student_local_id || null
+                        {/* Alerta de estudiantes que faltan en PowerSchool */}
+                        {onlyCmStudents.length > 0 && (
+                          <div className="p-4 bg-red-50 border-2 border-red-300 rounded-lg">
+                            <div className="flex items-center gap-2 mb-3">
+                              <AlertTriangle className="h-5 w-5 text-red-600" />
+                              <p className="text-sm font-bold text-red-800">
+                                ⚠️ {onlyCmStudents.length} estudiante{onlyCmStudents.length !== 1 ? "s" : ""} en Cometa NO existe{onlyCmStudents.length !== 1 ? "n" : ""} en PowerSchool:
+                              </p>
+                            </div>
+                            <div className="space-y-2">
+                              {onlyCmStudents.map((student, idx) => {
                                 const cmId = student.cmData?.student_id || null
                                 const cmIdentifier = student.cmData?.student_identifier || null
-                                
                                 return (
-                                  <TableRow key={idx} className={isMatched ? "bg-green-50/30" : isOnlyPs ? "bg-galaxy-50/30" : "bg-aurora-50/30"}>
-                                    <TableCell className="font-medium">
-                                      <div className="flex flex-col">
-                                        <span>{student.name}</span>
-                                        {isMatched && <span className="text-xs text-green-600 font-normal">✅ Coincide en ambos</span>}
-                                        {isOnlyPs && <span className="text-xs text-warning-600 font-normal">⚠️ Solo en PowerSchool</span>}
-                                        {isOnlyCm && <span className="text-xs text-aurora-600 font-normal">⚠️ Solo en Cometa</span>}
-                                      </div>
-                                    </TableCell>
-                                    <TableCell className="text-center">
-                                      {student.psData ? (
-                                        <div className="flex flex-col items-center">
-                                          <Badge variant="outline" className="bg-galaxy-50 text-galaxy-700 border-galaxy-200 mb-1">
-                                            ✅ Presente
-                                          </Badge>
-                                          <span className="text-xs text-neutral-600 font-mono">ID: {psId}</span>
-                                          {student.psData.student_local_id && student.psData.student_local_id !== "-" && (
-                                            <span className="text-xs text-neutral-500 font-mono">Mat: {student.psData.student_local_id}</span>
-                                          )}
-                                        </div>
-                                      ) : (
-                                        <div className="flex flex-col items-center">
-                                          <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 mb-1">
-                                            ❌ No existe
-                                          </Badge>
-                                          {cmId && (
-                                            <span className="text-xs text-neutral-400 font-mono">
-                                              (Cometa ID: {String(cmId).substring(0, 8)}...)
-                                            </span>
-                                          )}
-                                        </div>
+                                  <div key={idx} className="p-3 bg-white rounded border border-red-200">
+                                    <p className="font-semibold text-neutral-900">{student.name}</p>
+                                    <div className="flex gap-4 mt-1 text-xs text-neutral-600 font-mono">
+                                      <span>Cometa ID: {cmId ? String(cmId).substring(0, 12) + "..." : "-"}</span>
+                                      {cmIdentifier && cmIdentifier !== "-" && (
+                                        <span>CURP: {cmIdentifier}</span>
                                       )}
-                                    </TableCell>
-                                    <TableCell className="text-center">
-                                      {student.cmData ? (
-                                        <div className="flex flex-col items-center">
-                                          <Badge variant="outline" className="bg-aurora-50 text-aurora-700 border-aurora-200 mb-1">
-                                            ✅ Presente
-                                          </Badge>
-                                          <span className="text-xs text-neutral-600 font-mono">ID: {String(cmId).substring(0, 8)}...</span>
-                                          {cmIdentifier && cmIdentifier !== "-" && (
-                                            <span className="text-xs text-neutral-500 font-mono">CURP: {cmIdentifier}</span>
-                                          )}
-                                        </div>
-                                      ) : (
-                                        <div className="flex flex-col items-center">
-                                          <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 mb-1">
-                                            ❌ No existe
-                                          </Badge>
-                                          {psId && (
-                                            <span className="text-xs text-neutral-400 font-mono">
-                                              (PS ID: {psId})
-                                            </span>
-                                          )}
-                                        </div>
-                                      )}
-                                    </TableCell>
-                                  </TableRow>
+                                    </div>
+                                  </div>
                                 )
                               })}
-                            </TableBody>
-                          </Table>
-                                </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Resumen de coincidencias */}
+                        <div className="grid grid-cols-3 gap-3 text-center">
+                          <div className="p-3 bg-green-50 rounded-lg border border-green-200">
+                            <p className="text-2xl font-bold text-green-700">{matchedStudents.length}</p>
+                            <p className="text-xs text-green-600">Coinciden</p>
+                          </div>
+                          <div className="p-3 bg-galaxy-50 rounded-lg border border-galaxy-200">
+                            <p className="text-2xl font-bold text-galaxy-700">{onlyPsStudents.length}</p>
+                            <p className="text-xs text-galaxy-600">Solo PowerSchool</p>
+                          </div>
+                          <div className="p-3 bg-red-50 rounded-lg border border-red-300">
+                            <p className="text-2xl font-bold text-red-700">{onlyCmStudents.length}</p>
+                            <p className="text-xs text-red-600">Solo Cometa (faltan en PS)</p>
+                          </div>
+                        </div>
+
+                        {/* Tabla comparativa de estudiantes */}
+                        <details className="group">
+                          <summary className="cursor-pointer p-3 bg-neutral-100 rounded-lg hover:bg-neutral-200 transition-colors flex items-center justify-between">
+                            <span className="text-sm font-medium text-neutral-700">Ver tabla completa de todos los estudiantes ({allStudents.length})</span>
+                            <ChevronRight className="h-4 w-4 text-neutral-500 group-open:rotate-90 transition-transform" />
+                          </summary>
+                          <div className="mt-3 border border-neutral-200 rounded-lg overflow-hidden bg-white">
+                            <Table>
+                              <TableHeader>
+                                <TableRow className="bg-neutral-50 hover:bg-neutral-50">
+                                  <TableHead className="w-[40%]">Estudiante</TableHead>
+                                  <TableHead className="w-[30%] text-center">PowerSchool</TableHead>
+                                  <TableHead className="w-[30%] text-center">Cometa</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {allStudents.map((student, idx) => {
+                                  const isMatched = student.psData && student.cmData
+                                  const isOnlyPs = student.psData && !student.cmData
+                                  const isOnlyCm = !student.psData && student.cmData
+                                  
+                                  // Obtener IDs para mostrar
+                                  const psId = student.psData?.student_id || student.psData?.student_local_id || null
+                                  const cmId = student.cmData?.student_id || null
+                                  const cmIdentifier = student.cmData?.student_identifier || null
+                                  
+                                  return (
+                                    <TableRow key={idx} className={isMatched ? "bg-green-50/30" : isOnlyPs ? "bg-galaxy-50/30" : "bg-red-50/50"}>
+                                      <TableCell className="font-medium">
+                                        <div className="flex flex-col">
+                                          <span>{student.name}</span>
+                                          {isMatched && <span className="text-xs text-green-600 font-normal">✅ Coincide en ambos</span>}
+                                          {isOnlyPs && <span className="text-xs text-warning-600 font-normal">⚠️ Solo en PowerSchool</span>}
+                                          {isOnlyCm && <span className="text-xs text-red-600 font-normal">❌ FALTA en PowerSchool</span>}
+                                        </div>
+                                      </TableCell>
+                                      <TableCell className="text-center">
+                                        {student.psData ? (
+                                          <div className="flex flex-col items-center">
+                                            <Badge variant="outline" className="bg-galaxy-50 text-galaxy-700 border-galaxy-200 mb-1">
+                                              ✅ Presente
+                                            </Badge>
+                                            <span className="text-xs text-neutral-600 font-mono">ID: {psId}</span>
+                                            {student.psData.student_local_id && student.psData.student_local_id !== "-" && (
+                                              <span className="text-xs text-neutral-500 font-mono">Mat: {student.psData.student_local_id}</span>
+                                            )}
+                                          </div>
+                                        ) : (
+                                          <div className="flex flex-col items-center">
+                                            <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 mb-1">
+                                              ❌ No existe
+                                            </Badge>
+                                            {cmId && (
+                                              <span className="text-xs text-neutral-400 font-mono">
+                                                (Cometa ID: {String(cmId).substring(0, 8)}...)
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                      </TableCell>
+                                      <TableCell className="text-center">
+                                        {student.cmData ? (
+                                          <div className="flex flex-col items-center">
+                                            <Badge variant="outline" className="bg-aurora-50 text-aurora-700 border-aurora-200 mb-1">
+                                              ✅ Presente
+                                            </Badge>
+                                            <span className="text-xs text-neutral-600 font-mono">ID: {String(cmId).substring(0, 8)}...</span>
+                                            {cmIdentifier && cmIdentifier !== "-" && (
+                                              <span className="text-xs text-neutral-500 font-mono">CURP: {cmIdentifier}</span>
+                                            )}
+                                          </div>
+                                        ) : (
+                                          <div className="flex flex-col items-center">
+                                            <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 mb-1">
+                                              ❌ No existe
+                                            </Badge>
+                                            {psId && (
+                                              <span className="text-xs text-neutral-400 font-mono">
+                                                (PS ID: {psId})
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                      </TableCell>
+                                    </TableRow>
+                                  )
+                                })}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        </details>
 
                         {mismatch && (
                           <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
