@@ -345,8 +345,14 @@ const compareStudentGuardians = (partnerData: any, cometaData: any) => {
   return { hasDiscrepancy: false, details: null }
 }
 
-const getGuardianStudentDiscrepancy = (partnerData: any, cometaData: any): { hasDiscrepancy: boolean; reason: string | null } => {
-  if (!partnerData || !cometaData) return { hasDiscrepancy: false, reason: null }
+const getGuardianStudentDiscrepancy = (partnerData: any, cometaData: any): { 
+  hasDiscrepancy: boolean; 
+  reason: string | null;
+  psCount: number;
+  cmCount: number;
+  syncIssue: "none" | "missing_in_cometa" | "extra_in_cometa" | "different";
+} => {
+  if (!partnerData || !cometaData) return { hasDiscrepancy: false, reason: null, psCount: 0, cmCount: 0, syncIssue: "none" }
 
   const partnerStudents = partnerData.students || 
     (partnerData.student_id ? [{
@@ -360,7 +366,10 @@ const getGuardianStudentDiscrepancy = (partnerData: any, cometaData: any): { has
       student_name: cometaData.student_name
     }] : [])
 
-  if (partnerStudents.length === 0 && cometaStudents.length === 0) return { hasDiscrepancy: false, reason: null }
+  const psCount = partnerStudents.length
+  const cmCount = cometaStudents.length
+
+  if (psCount === 0 && cmCount === 0) return { hasDiscrepancy: false, reason: null, psCount, cmCount, syncIssue: "none" }
   
   // Normalizamos nombres para comparación
   const normalizeName = (name: string) => {
@@ -375,11 +384,22 @@ const getGuardianStudentDiscrepancy = (partnerData: any, cometaData: any): { has
   const partnerNames = partnerStudents.map((s: any) => normalizeName(s.student_name)).sort()
   const cometaNames = cometaStudents.map((s: any) => normalizeName(s.student_name)).sort()
 
+  // Determinar tipo de problema de sincronización
+  let syncIssue: "none" | "missing_in_cometa" | "extra_in_cometa" | "different" = "none"
+  
   // 1. Verificar cantidad
-  if (partnerStudents.length !== cometaStudents.length) {
+  if (psCount !== cmCount) {
+    if (psCount > cmCount) {
+      syncIssue = "missing_in_cometa" // Faltan estudiantes en Cometa (deben sincronizarse)
+    } else {
+      syncIssue = "extra_in_cometa" // Hay estudiantes de más en Cometa
+    }
     return { 
       hasDiscrepancy: true, 
-      reason: `Cantidad diferente: PowerSchool (${partnerStudents.length}) vs Cometa (${cometaStudents.length})` 
+      reason: `Cantidad diferente: PowerSchool (${psCount}) vs Cometa (${cmCount})`,
+      psCount,
+      cmCount,
+      syncIssue
     }
   }
 
@@ -394,13 +414,18 @@ const getGuardianStudentDiscrepancy = (partnerData: any, cometaData: any): { has
      if (inPSnotCometa.length > 0) details.push(`Solo en PS: ${inPSnotCometa.slice(0, 2).join(", ")}${inPSnotCometa.length > 2 ? "..." : ""}`)
      if (inCometaNotPS.length > 0) details.push(`Solo en Cometa: ${inCometaNotPS.slice(0, 2).join(", ")}${inCometaNotPS.length > 2 ? "..." : ""}`)
      
+     syncIssue = "different"
+     
      return {
        hasDiscrepancy: true,
-       reason: `Estudiantes diferentes. ${details.join(". ")}`
+       reason: `Estudiantes diferentes. ${details.join(". ")}`,
+       psCount,
+       cmCount,
+       syncIssue
      }
   }
 
-  return { hasDiscrepancy: false, reason: null }
+  return { hasDiscrepancy: false, reason: null, psCount, cmCount, syncIssue: "none" }
 }
 
 export function MatchResultsTable({ results, dataType = "students" }: MatchResultsTableProps) {
@@ -424,7 +449,7 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
       // Para tutores, verificar discrepancias en estudiantes asignados
       const guardianStudentDiscrepancy = dataType === "guardians"
         ? getGuardianStudentDiscrepancy(result.partnerData, result.cometaData)
-        : { hasDiscrepancy: false, reason: null }
+        : { hasDiscrepancy: false, reason: null, psCount: 0, cmCount: 0, syncIssue: "none" as const }
 
       const fieldDiscrepanciesCount = Object.keys(discrepancies).length
       const totalDiscrepanciesCount = fieldDiscrepanciesCount + (guardianComparison.hasDiscrepancy ? 1 : 0) + (guardianStudentDiscrepancy.hasDiscrepancy ? 1 : 0)
@@ -436,6 +461,9 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
         hasGuardianDiscrepancy: guardianComparison.hasDiscrepancy,
         studentMismatch: guardianStudentDiscrepancy.hasDiscrepancy,
         studentMismatchReason: guardianStudentDiscrepancy.reason,
+        psStudentCount: guardianStudentDiscrepancy.psCount,
+        cmStudentCount: guardianStudentDiscrepancy.cmCount,
+        syncIssue: guardianStudentDiscrepancy.syncIssue,
       }
     })
   }, [results, dataType])
@@ -449,6 +477,12 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
       filtered = filtered.filter((r) => r.matchStatus === "only_partner" || r.matchStatus === "only_cometa")
     } else if (statusFilter === "student_mismatch") {
       filtered = filtered.filter((r) => (r as any).studentMismatch === true)
+    } else if (statusFilter === "missing_in_cometa") {
+      // Tutores donde PowerSchool tiene MÁS estudiantes que Cometa (faltan sincronizar a Cometa)
+      filtered = filtered.filter((r) => (r as any).syncIssue === "missing_in_cometa")
+    } else if (statusFilter === "extra_in_cometa") {
+      // Tutores donde Cometa tiene MÁS estudiantes que PowerSchool (relaciones que posiblemente sobran)
+      filtered = filtered.filter((r) => (r as any).syncIssue === "extra_in_cometa")
     } else if (statusFilter !== "all") {
       filtered = filtered.filter((r) => r.matchStatus === statusFilter)
     }
@@ -639,6 +673,9 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
       ).length,
       with_discrepancies: resultsWithDiscrepancies.filter((r) => r.hasDiscrepancies).length,
       student_mismatch: resultsWithDiscrepancies.filter((r) => (r as any).studentMismatch === true).length,
+      // NUEVAS ESTADÍSTICAS DE SINCRONIZACIÓN
+      missing_in_cometa: resultsWithDiscrepancies.filter((r) => (r as any).syncIssue === "missing_in_cometa").length,
+      extra_in_cometa: resultsWithDiscrepancies.filter((r) => (r as any).syncIssue === "extra_in_cometa").length,
     }
   }, [resultsWithDiscrepancies])
 
@@ -819,6 +856,43 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
               </Card>
             )}
           </div>
+
+          {/* Estadísticas de sincronización para tutores */}
+          {dataType === "guardians" && (stats.missing_in_cometa > 0 || stats.extra_in_cometa > 0) && (
+            <div className="grid grid-cols-2 gap-3 mt-3">
+              <Card
+                className={`border-blue-200 bg-blue-50 cursor-pointer transition-all hover:shadow-md ${statusFilter === "missing_in_cometa" ? "ring-2 ring-blue-400" : ""}`}
+                onClick={() => handleStatClick("missing_in_cometa")}
+              >
+                <CardContent className="p-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4 text-blue-500" />
+                    <div>
+                      <p className="text-xs text-blue-600 font-medium">⬇️ Faltan en Cometa</p>
+                      <p className="text-lg font-bold text-blue-700">{stats.missing_in_cometa}</p>
+                      <p className="text-[10px] text-blue-500">PowerSchool tiene más hijos</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card
+                className={`border-purple-200 bg-purple-50 cursor-pointer transition-all hover:shadow-md ${statusFilter === "extra_in_cometa" ? "ring-2 ring-purple-400" : ""}`}
+                onClick={() => handleStatClick("extra_in_cometa")}
+              >
+                <CardContent className="p-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4 text-purple-500" />
+                    <div>
+                      <p className="text-xs text-purple-600 font-medium">⬆️ Extra en Cometa</p>
+                      <p className="text-lg font-bold text-purple-700">{stats.extra_in_cometa}</p>
+                      <p className="text-[10px] text-purple-500">Cometa tiene más hijos que PS</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
         </CardHeader>
 
         <CardContent className="p-6 space-y-6">
@@ -853,6 +927,12 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                 <SelectItem value="with_discrepancies">Con Discrepancias</SelectItem>
                 {dataType === "guardians" && stats.student_mismatch > 0 && (
                   <SelectItem value="student_mismatch">Estudiante Diferente</SelectItem>
+                )}
+                {dataType === "guardians" && stats.missing_in_cometa > 0 && (
+                  <SelectItem value="missing_in_cometa">⬇️ Faltan en Cometa</SelectItem>
+                )}
+                {dataType === "guardians" && stats.extra_in_cometa > 0 && (
+                  <SelectItem value="extra_in_cometa">⬆️ Extra en Cometa</SelectItem>
                 )}
                 <SelectItem value="only_partner">Solo Partner</SelectItem>
                 <SelectItem value="only_cometa">Solo Cometa</SelectItem>
