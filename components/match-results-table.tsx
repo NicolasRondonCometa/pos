@@ -662,6 +662,98 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
     XLSX.writeFile(workbook, `tutores-diferencias-estudiantes-${today}.xlsx`)
   }
 
+  const handleDownloadSyncIssues = () => {
+    // Obtener tutores con relaciones extra en Cometa (más hijos en Cometa que en PowerSchool)
+    const extraInCometaResults = resultsWithDiscrepancies.filter((r) => (r as any).syncIssue === "extra_in_cometa")
+    
+    if (extraInCometaResults.length === 0) return
+
+    // Normalizar nombre para comparación
+    const normalizeName = (name: string) => {
+      return (name || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    }
+
+    const dataToExport = extraInCometaResults.map((result) => {
+      const sourceData = result.partnerData || result.cometaData
+      
+      // Obtener estudiantes de cada sistema
+      const partnerStudents = result.partnerData?.students || 
+        (result.partnerData?.student_id ? [{ 
+          student_name: result.partnerData.student_name,
+          student_id: result.partnerData.student_id 
+        }] : [])
+      
+      const cometaStudents = result.cometaData?.students || 
+        (result.cometaData?.student_id ? [{ 
+          student_name: result.cometaData.student_name,
+          student_id: result.cometaData.student_id 
+        }] : [])
+
+      // Identificar estudiantes en Cometa que NO están en PowerSchool
+      const psNormalizedNames = partnerStudents.map((s: any) => normalizeName(s.student_name || ""))
+      
+      const studentsOnlyInCometa = cometaStudents.filter((cmStudent: any) => {
+        const cmNormalized = normalizeName(cmStudent.student_name || "")
+        return !psNormalizedNames.some((psName: string) => psName === cmNormalized)
+      })
+
+      // Formatear la información de manera clara
+      const formatStudentList = (students: any[], includeId = true) => {
+        if (!students || students.length === 0) return "Ninguno"
+        return students.map((s: any) => {
+          const name = s.student_name || "Sin nombre"
+          const id = s.student_id || s.id || ""
+          return includeId && id ? `${name} (ID: ${id})` : name
+        }).join(" | ")
+      }
+
+      return {
+        "Tutor - Nombre Completo": `${sourceData?.firstName || sourceData?.first_name || ""} ${sourceData?.lastName || sourceData?.last_name || ""}`.trim(),
+        "Email": sourceData?.emails || sourceData?.email || "-",
+        "Teléfono": sourceData?.phones || sourceData?.phone || "-",
+        "# Estudiantes PowerSchool": partnerStudents.length,
+        "# Estudiantes Cometa": cometaStudents.length,
+        "Estudiantes en PowerSchool": formatStudentList(partnerStudents),
+        "Estudiantes en Cometa": formatStudentList(cometaStudents),
+        "⚠️ RELACIONES SIN SINCRONIZAR (en Cometa pero NO en PowerSchool)": formatStudentList(studentsOnlyInCometa),
+        "Cantidad de Relaciones Faltantes": studentsOnlyInCometa.length,
+        "ID Tutor PowerSchool": result.partnerData?.id || "-",
+        "ID Tutor Cometa": result.cometaData?.id || "-",
+      }
+    })
+
+    // Ordenar por cantidad de relaciones faltantes (mayor a menor)
+    dataToExport.sort((a, b) => b["Cantidad de Relaciones Faltantes"] - a["Cantidad de Relaciones Faltantes"])
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport)
+    
+    // Ajustar anchos de columna para mejor legibilidad
+    worksheet['!cols'] = [
+      { wch: 35 },  // Nombre
+      { wch: 30 },  // Email
+      { wch: 18 },  // Teléfono
+      { wch: 12 },  // # PS
+      { wch: 12 },  // # Cometa
+      { wch: 50 },  // Estudiantes PS
+      { wch: 50 },  // Estudiantes Cometa
+      { wch: 60 },  // Relaciones faltantes
+      { wch: 15 },  // Cantidad faltantes
+      { wch: 20 },  // ID Tutor PS
+      { wch: 38 },  // ID Tutor Cometa
+    ]
+    
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Relaciones Faltantes en PS")
+    
+    const today = new Date().toISOString().split('T')[0]
+    XLSX.writeFile(workbook, `tutores-relaciones-faltantes-powerschool-${today}.xlsx`)
+  }
+
   const stats = useMemo(() => {
     return {
       matched: resultsWithDiscrepancies.filter((r) => r.matchStatus === "matched").length,
@@ -722,7 +814,18 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
               </Badge>
               
               {filteredResults.length > 0 && (
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
+                  {dataType === "guardians" && stats.extra_in_cometa > 0 && (
+                    <Button
+                      onClick={handleDownloadSyncIssues}
+                      variant="outline"
+                      size="sm"
+                      className="border-purple-300 bg-purple-50 hover:bg-purple-100 text-purple-700"
+                    >
+                      <Download className="h-4 w-4 mr-2" />
+                      📋 Relaciones Faltantes ({stats.extra_in_cometa})
+                    </Button>
+                  )}
                   {dataType === "guardians" && stats.student_mismatch > 0 && (
                     <Button
                       onClick={handleDownloadMismatch}
