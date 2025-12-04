@@ -1473,34 +1473,67 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                                 const isOnlyPs = student.psData && !student.cmData
                                 const isOnlyCm = !student.psData && student.cmData
                                 
+                                // Obtener IDs para mostrar
+                                const psId = student.psData?.student_id || student.psData?.student_local_id || null
+                                const cmId = student.cmData?.student_id || null
+                                const cmIdentifier = student.cmData?.student_identifier || null
+                                
                                 return (
                                   <TableRow key={idx} className={isMatched ? "bg-green-50/30" : isOnlyPs ? "bg-galaxy-50/30" : "bg-aurora-50/30"}>
                                     <TableCell className="font-medium">
-                                      {student.name}
-                                      {isMatched && <span className="ml-2 text-xs text-green-600 font-normal">(Coincide)</span>}
+                                      <div className="flex flex-col">
+                                        <span>{student.name}</span>
+                                        {isMatched && <span className="text-xs text-green-600 font-normal">✅ Coincide en ambos</span>}
+                                        {isOnlyPs && <span className="text-xs text-warning-600 font-normal">⚠️ Solo en PowerSchool</span>}
+                                        {isOnlyCm && <span className="text-xs text-aurora-600 font-normal">⚠️ Solo en Cometa</span>}
+                                      </div>
                                     </TableCell>
                                     <TableCell className="text-center">
                                       {student.psData ? (
                                         <div className="flex flex-col items-center">
                                           <Badge variant="outline" className="bg-galaxy-50 text-galaxy-700 border-galaxy-200 mb-1">
-                                            Presente
+                                            ✅ Presente
                                           </Badge>
-                                          <span className="text-xs text-neutral-500 font-mono">ID: {student.psData.student_id}</span>
+                                          <span className="text-xs text-neutral-600 font-mono">ID: {psId}</span>
+                                          {student.psData.student_local_id && student.psData.student_local_id !== "-" && (
+                                            <span className="text-xs text-neutral-500 font-mono">Mat: {student.psData.student_local_id}</span>
+                                          )}
                                         </div>
                                       ) : (
-                                        <span className="text-neutral-400">-</span>
+                                        <div className="flex flex-col items-center">
+                                          <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 mb-1">
+                                            ❌ No existe
+                                          </Badge>
+                                          {cmId && (
+                                            <span className="text-xs text-neutral-400 font-mono">
+                                              (Cometa ID: {String(cmId).substring(0, 8)}...)
+                                            </span>
+                                          )}
+                                        </div>
                                       )}
                                     </TableCell>
                                     <TableCell className="text-center">
                                       {student.cmData ? (
                                         <div className="flex flex-col items-center">
                                           <Badge variant="outline" className="bg-aurora-50 text-aurora-700 border-aurora-200 mb-1">
-                                            Presente
+                                            ✅ Presente
                                           </Badge>
-                                          <span className="text-xs text-neutral-500 font-mono">ID: {String(student.cmData.student_id).substring(0, 8)}...</span>
+                                          <span className="text-xs text-neutral-600 font-mono">ID: {String(cmId).substring(0, 8)}...</span>
+                                          {cmIdentifier && cmIdentifier !== "-" && (
+                                            <span className="text-xs text-neutral-500 font-mono">CURP: {cmIdentifier}</span>
+                                          )}
                                         </div>
                                       ) : (
-                                        <span className="text-neutral-400">-</span>
+                                        <div className="flex flex-col items-center">
+                                          <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 mb-1">
+                                            ❌ No existe
+                                          </Badge>
+                                          {psId && (
+                                            <span className="text-xs text-neutral-400 font-mono">
+                                              (PS ID: {psId})
+                                            </span>
+                                          )}
+                                        </div>
                                       )}
                                     </TableCell>
                                   </TableRow>
@@ -1508,7 +1541,7 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                               })}
                             </TableBody>
                           </Table>
-                        </div>
+                                </div>
 
                         {mismatch && (
                           <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
