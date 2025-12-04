@@ -1543,7 +1543,7 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                             <div className="flex items-center gap-2 mb-3">
                               <AlertTriangle className="h-5 w-5 text-red-600" />
                               <p className="text-sm font-bold text-red-800">
-                                ⚠️ {onlyCmStudents.length} estudiante{onlyCmStudents.length !== 1 ? "s" : ""} en Cometa NO existe{onlyCmStudents.length !== 1 ? "n" : ""} en PowerSchool:
+                                ⚠️ {onlyCmStudents.length} relación{onlyCmStudents.length !== 1 ? "es" : ""} tutor-estudiante en Cometa NO existe{onlyCmStudents.length !== 1 ? "n" : ""} en PowerSchool:
                               </p>
                             </div>
                             <div className="space-y-2">
@@ -1632,7 +1632,7 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                                         ) : (
                                           <div className="flex flex-col items-center">
                                             <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 mb-1">
-                                              ❌ No existe
+                                              ❌ Sin relación
                                             </Badge>
                                             {cmId && (
                                               <span className="text-xs text-neutral-400 font-mono">
@@ -1656,7 +1656,7 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                                         ) : (
                                           <div className="flex flex-col items-center">
                                             <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 mb-1">
-                                              ❌ No existe
+                                              ❌ Sin relación
                                             </Badge>
                                             {psId && (
                                               <span className="text-xs text-neutral-400 font-mono">
