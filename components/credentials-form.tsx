@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -15,8 +15,14 @@ import {
   getCometaGuardians, // Agregando import de getCometaGuardians
   performMatching,
   performGuardiansMatching,
+  getMatchedStudentsListFromSession,
+  processOneStudentGuardians,
+  getGuardianComparisonResultsFromDB,
+  checkExistingComparisonResults,
+  findLatestComparisonResults,
   type MatchRule,
   type MatchedStudent,
+  type GuardianComparisonResult,
   getGuardiansForSingleSchool, // Agregando import de getGuardiansForSingleSchool
   getGuardiansForSingleSchoolBatch,
 } from "@/app/actions/credentials"
@@ -25,6 +31,7 @@ import { StudentsTable } from "./students-table"
 import { MatchConfig } from "./match-config"
 import { MatchResultsTable } from "./match-results-table"
 import { DiscrepancyResolver } from "./discrepancy-resolver" // Imported new component
+import { GuardiansComparison } from "./guardians-comparison" // Imported guardians comparison component
 import { Badge } from "@/components/ui/badge" // Imported new component
 
 interface Integration {
@@ -55,6 +62,7 @@ type ViewState =
   | "matchConfig"
   | "matchResults"
   | "discrepancyResolver" // Added new view state for discrepancy resolver
+  | "guardiansComparison" // Added new view state for guardians comparison per student
   | "loading"
 type DataType = "students" | "guardians"
 
@@ -94,6 +102,54 @@ export function CredentialsForm() {
   const [isLoadingPowerschool, setIsLoadingPowerschool] = useState(false)
   const [isLoadingCometa, setIsLoadingCometa] = useState(false)
   const [includeInactiveStudents, setIncludeInactiveStudents] = useState(false)
+
+  // Estados para comparación de tutores por estudiante
+  const [guardiansComparisonResults, setGuardiansComparisonResults] = useState<GuardianComparisonResult[]>([])
+  const [isComparingGuardians, setIsComparingGuardians] = useState(false)
+  const [comparisonProgress, setComparisonProgress] = useState<{ current: number; total: number; studentName: string } | null>(null)
+  const [matchSessionId, setMatchSessionId] = useState<string | null>(null)
+  const [existingComparisonInfo, setExistingComparisonInfo] = useState<{ hasResults: boolean; count: number; withDiscrepancies: number; sessionId?: string } | null>(null)
+
+  // Verificar resultados existentes cuando cambia a la vista de resultados
+  useEffect(() => {
+    const checkExisting = async () => {
+      if (view === "matchResults" && selectedIntegration) {
+        console.log("[v0] Buscando resultados de comparación existentes para tenant:", selectedIntegration.tenant_integration_id)
+        
+        // Buscar en CUALQUIER sesión reciente, no solo la actual
+        const latestResults = await findLatestComparisonResults(selectedIntegration.tenant_integration_id)
+        
+        if (latestResults.success && latestResults.hasResults) {
+          setExistingComparisonInfo({
+            hasResults: true,
+            count: latestResults.count || 0,
+            withDiscrepancies: latestResults.withDiscrepancies || 0,
+            sessionId: latestResults.sessionId,
+          })
+          console.log(`[v0] ✅ Resultados existentes encontrados en sesión ${latestResults.sessionId}: ${latestResults.count} estudiantes, ${latestResults.withDiscrepancies} con discrepancias`)
+        } else {
+          // Si no hay en otras sesiones, verificar la sesión actual
+          if (matchSessionId) {
+            const currentCheck = await checkExistingComparisonResults(matchSessionId)
+            if (currentCheck.success && currentCheck.hasResults) {
+              setExistingComparisonInfo({
+                hasResults: true,
+                count: currentCheck.count || 0,
+                withDiscrepancies: currentCheck.withDiscrepancies || 0,
+                sessionId: matchSessionId,
+              })
+            } else {
+              setExistingComparisonInfo(null)
+            }
+          } else {
+            setExistingComparisonInfo(null)
+          }
+          console.log("[v0] No hay resultados existentes")
+        }
+      }
+    }
+    checkExisting()
+  }, [view, selectedIntegration, matchSessionId])
 
   const processFile = async (file: File) => {
     setFileName(file.name)
@@ -374,7 +430,7 @@ export function CredentialsForm() {
               if (totalStudentsKnown === 0) {
                 totalStudentsKnown = totalStudents
               }
-              
+
               // Actualizar progreso con datos reales
               setGuardiansProgress({
                 currentSchool: schoolId,
@@ -579,6 +635,24 @@ export function CredentialsForm() {
         }
 
         setMatchResults(result.results)
+        // Guardar el sessionId para usar en la comparación de tutores
+        if (result.sessionId) {
+          setMatchSessionId(result.sessionId)
+          console.log("[v0] SessionId guardado:", result.sessionId)
+          
+          // Verificar si hay resultados de comparación existentes
+          const existingCheck = await checkExistingComparisonResults(result.sessionId)
+          if (existingCheck.success && existingCheck.hasResults) {
+            setExistingComparisonInfo({
+              hasResults: true,
+              count: existingCheck.count || 0,
+              withDiscrepancies: existingCheck.withDiscrepancies || 0,
+            })
+            console.log(`[v0] Resultados de comparación existentes: ${existingCheck.count} estudiantes, ${existingCheck.withDiscrepancies} con discrepancias`)
+          } else {
+            setExistingComparisonInfo(null)
+          }
+        }
         setView("matchResults")
       } else if (dataType === "guardians") {
         setLoadingMessage("Comparando tutores de PowerSchool con Cometa...")
@@ -616,6 +690,151 @@ export function CredentialsForm() {
     }
   }
 
+  // Función para cargar resultados existentes de comparación
+  const handleLoadExistingComparison = async () => {
+    // Usar el sessionId de los resultados existentes, o el actual
+    const sessionToLoad = existingComparisonInfo?.sessionId || matchSessionId
+    
+    if (!sessionToLoad) {
+      setError("No hay sesión con resultados guardados")
+      return
+    }
+
+    setView("guardiansComparison")
+    setIsComparingGuardians(true)
+    setComparisonProgress({ current: 0, total: 0, studentName: "Cargando resultados guardados..." })
+
+    try {
+      console.log(`[v0] Cargando resultados de sesión: ${sessionToLoad}`)
+      const resultsResponse = await getGuardianComparisonResultsFromDB(sessionToLoad)
+
+      setIsComparingGuardians(false)
+      setComparisonProgress(null)
+
+      if (!resultsResponse.success || !resultsResponse.results) {
+        setError(resultsResponse.error || "Error al cargar resultados")
+        setView("matchResults")
+        return
+      }
+
+      setGuardiansComparisonResults(resultsResponse.results)
+      console.log(`[v0] ✅ Resultados cargados: ${resultsResponse.results.length} estudiantes`)
+    } catch (err) {
+      console.error("[v0] Error cargando resultados:", err)
+      setError("Error al cargar resultados guardados")
+      setIsComparingGuardians(false)
+      setComparisonProgress(null)
+      setView("matchResults")
+    }
+  }
+
+  // Nueva función para comparar tutores de cada estudiante emparejado (usando SQLite)
+  // Procesa uno por uno para actualizar la barra de progreso en tiempo real
+  const handleCompareStudentGuardians = async () => {
+    if (!selectedIntegration) {
+      setError("No se ha seleccionado una integración")
+      return
+    }
+
+    if (!matchSessionId) {
+      setError("No hay sesión de matching. Por favor, ejecute el matching primero.")
+      return
+    }
+
+    setView("guardiansComparison")
+    setIsComparingGuardians(true)
+    setGuardiansComparisonResults([])
+    setComparisonProgress({ current: 0, total: 0, studentName: "Obteniendo lista de estudiantes..." })
+    setError(null)
+
+    try {
+      console.log(`[v0] Iniciando comparación de tutores usando sessionId: ${matchSessionId}`)
+
+      // 1. Obtener lista de estudiantes para procesar
+      const listResult = await getMatchedStudentsListFromSession(matchSessionId)
+
+      if (!listResult.success || !listResult.students) {
+        setError(listResult.error || "Error al obtener lista de estudiantes")
+        setIsComparingGuardians(false)
+        setComparisonProgress(null)
+        return
+      }
+
+      const students = listResult.students
+      const total = students.length
+
+      console.log(`[v0] ${total} estudiantes para procesar`)
+      setComparisonProgress({ current: 0, total, studentName: "Iniciando procesamiento..." })
+
+      // 2. Procesar cada estudiante uno por uno
+      let processedCount = 0
+      let discrepanciesCount = 0
+
+      for (const student of students) {
+        // Actualizar progreso ANTES de procesar
+        setComparisonProgress({
+          current: processedCount,
+          total,
+          studentName: student.studentName || `Estudiante ${processedCount + 1}`,
+        })
+
+        // Procesar este estudiante
+        const result = await processOneStudentGuardians(
+          selectedIntegration.tenant_integration_id,
+          matchSessionId,
+          student.studentId,
+          student.studentName,
+          student.studentLocalId || "-",
+          student.cometaStudentId,
+          student.schoolId
+        )
+
+        processedCount++
+
+        if (result.success && result.hasDiscrepancies) {
+          discrepanciesCount++
+        }
+
+        // Actualizar progreso DESPUÉS de procesar
+        setComparisonProgress({
+          current: processedCount,
+          total,
+          studentName: processedCount < total 
+            ? students[processedCount]?.studentName || `Estudiante ${processedCount + 1}`
+            : "¡Completado!",
+        })
+
+        // Pequeño delay para evitar saturar el servidor
+        if (processedCount < total) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+      }
+
+      console.log(`[v0] Procesamiento completado: ${processedCount} estudiantes, ${discrepanciesCount} con discrepancias`)
+
+      // 3. Obtener resultados finales desde SQLite
+      const resultsResponse = await getGuardianComparisonResultsFromDB(matchSessionId)
+
+      setIsComparingGuardians(false)
+      setComparisonProgress(null)
+
+      if (!resultsResponse.success || !resultsResponse.results) {
+        setError(resultsResponse.error || "Error al obtener resultados de la comparación")
+        return
+      }
+
+      setGuardiansComparisonResults(resultsResponse.results)
+
+      const withDiscrepancies = resultsResponse.results.filter((r) => r.hasDiscrepancies).length
+      console.log(`[v0] Comparación completada: ${resultsResponse.results.length} estudiantes procesados, ${withDiscrepancies} con discrepancias`)
+    } catch (err) {
+      console.error("[v0] Error en handleCompareStudentGuardians:", err)
+      setError("Error inesperado durante la comparación de tutores")
+      setIsComparingGuardians(false)
+      setComparisonProgress(null)
+    }
+  }
+
   const handleReset = () => {
     setView("credentials")
     setJsonInput("")
@@ -636,6 +855,12 @@ export function CredentialsForm() {
     setCometaData([])
     setIsLoadingPowerschool(false)
     setIsLoadingCometa(false)
+    // Reset guardians comparison states
+    setGuardiansComparisonResults([])
+    setIsComparingGuardians(false)
+    setComparisonProgress(null)
+    setMatchSessionId(null)
+    setExistingComparisonInfo(null)
   }
 
   const handleBackToIntegrations = () => {
@@ -1257,6 +1482,8 @@ export function CredentialsForm() {
   }
 
   if (view === "matchResults") {
+    const matchedStudentsCount = matchResults.filter((r) => r.matchStatus === "matched").length
+
     return (
       <div className="space-y-4">
         <Button
@@ -1276,7 +1503,30 @@ export function CredentialsForm() {
 
         <MatchResultsTable results={matchResults} dataType={dataType || "students"} />
 
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-3 flex-wrap">
+          {/* Botón para ver resultados de comparación existentes */}
+          {dataType === "students" && existingComparisonInfo?.hasResults && (
+            <Button
+              onClick={handleLoadExistingComparison}
+              variant="outline"
+              className="border-success-400 bg-success-50 hover:bg-success-100 text-success-700"
+            >
+              <CheckCircle2 className="mr-2 h-4 w-4" />
+              Ver Comparación Anterior ({existingComparisonInfo.count} estudiantes, {existingComparisonInfo.withDiscrepancies} con problemas)
+            </Button>
+          )}
+
+          {/* Botón para comparar tutores de estudiantes emparejados - solo para matching de estudiantes */}
+          {dataType === "students" && matchedStudentsCount > 0 && (
+            <Button
+              onClick={handleCompareStudentGuardians}
+              className="bg-galaxy-500 hover:bg-galaxy-600 text-white"
+            >
+              <Users className="mr-2 h-4 w-4" />
+              {existingComparisonInfo?.hasResults ? "Volver a Comparar" : "Comparar Tutores"} ({matchedStudentsCount} estudiantes)
+            </Button>
+          )}
+
           <Button
             onClick={() => setView("discrepancyResolver")}
             className="bg-warning-500 hover:bg-warning-600 text-white"
@@ -1310,6 +1560,43 @@ export function CredentialsForm() {
           results={matchResults}
           onBack={() => setView("matchResults")}
           dataType={dataType || "students"}
+        />
+      </div>
+    )
+  }
+
+  if (view === "guardiansComparison") {
+    return (
+      <div className="space-y-4">
+        <Button
+          variant="ghost"
+          onClick={() => {
+            setView("matchResults")
+            setIsComparingGuardians(false)
+            setComparisonProgress(null)
+          }}
+          className="text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100"
+          disabled={isComparingGuardians}
+        >
+          <ArrowLeft className="mr-2 h-4 w-4" />
+          Volver a Resultados del Matching
+        </Button>
+
+        {error && (
+          <Alert variant="destructive" className="border-error-300 bg-error-50">
+            <AlertDescription className="text-error-700">{error}</AlertDescription>
+          </Alert>
+        )}
+
+        <GuardiansComparison
+          results={guardiansComparisonResults}
+          isLoading={isComparingGuardians}
+          progress={comparisonProgress}
+          onBack={() => {
+            setView("matchResults")
+            setIsComparingGuardians(false)
+            setComparisonProgress(null)
+          }}
         />
       </div>
     )

@@ -1,5 +1,17 @@
 "use server"
 
+import {
+  createMatchSession,
+  saveMatchResults,
+  getMatchResults,
+  getMatchedStudentsForComparison,
+  saveGuardianComparisonResult,
+  getGuardianComparisonResults,
+  clearGuardianComparisonResults,
+  cleanupOldSessions,
+  getLatestSessionWithComparisonResults,
+} from "@/lib/db"
+
 const rawApiBaseUrl = (process.env.API_BASE_URL || "http://localhost").trim()
 const API_BASE_URL =
   rawApiBaseUrl.startsWith("http://") || rawApiBaseUrl.startsWith("https://")
@@ -609,11 +621,14 @@ export async function performMatching(
   partnerStudents: any[],
   rules: MatchRule[],
   includeInactive: boolean = false,
-): Promise<{ success: boolean; results?: MatchedStudent[]; error?: string }> {
+): Promise<{ success: boolean; results?: MatchedStudent[]; sessionId?: string; error?: string }> {
   try {
     console.log("[v0] Iniciando matching en el servidor...")
     console.log("[v0] Total estudiantes de PowerSchool recibidos:", partnerStudents.length)
     console.log("[v0] Incluir estudiantes inactivos:", includeInactive)
+
+    // Limpiar sesiones antiguas
+    cleanupOldSessions()
 
     const cometaResult = await getCometaStudents(tenantIntegrationId, tenantId, [], includeInactive)
     if (!cometaResult.success || !cometaResult.students) {
@@ -630,9 +645,15 @@ export async function performMatching(
     console.log("[v0] Matching completado exitosamente")
     console.log("[v0] Total resultados:", results.length)
 
+    // Guardar resultados en SQLite
+    const sessionId = createMatchSession(tenantIntegrationId, tenantId, "students")
+    saveMatchResults(sessionId, results)
+    console.log("[v0] Resultados guardados en SQLite con sessionId:", sessionId)
+
     return {
       success: true,
       results,
+      sessionId,
     }
   } catch (error) {
     console.error("[v0] Error en performMatching:", error)
@@ -1484,6 +1505,738 @@ export async function getGuardiansForSingleSchoolBatch(
       success: false,
       error: `Error inesperado en escuela ${schoolId}`,
     }
+  }
+}
+
+// Obtener tutores de un estudiante específico de Cometa (Schools API)
+export async function getStudentGuardiansFromCometa(
+  studentId: string,
+): Promise<{ success: boolean; guardians?: any[]; error?: string }> {
+  try {
+    if (!SCHOOLS_API_TOKEN) {
+      return {
+        success: false,
+        error: "SCHOOLS_API_TOKEN no está configurado",
+      }
+    }
+
+    const guardiansUrl = `${SCHOOLS_API_BASE_URL}/api/v1/students/${studentId}/guardians`
+    console.log(`[v0] Obteniendo tutores de Cometa para estudiante ${studentId}`)
+
+    const response = await fetch(guardiansUrl, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        Authorization: `Bearer ${SCHOOLS_API_TOKEN}`,
+        "User-Agent": "v0-integration-app",
+      },
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      return {
+        success: false,
+        error: `Error HTTP ${response.status}: ${errorText.substring(0, 100)}`,
+      }
+    }
+
+    const responseText = await response.text()
+    let guardiansData: any
+
+    try {
+      guardiansData = JSON.parse(responseText)
+    } catch {
+      return {
+        success: false,
+        error: "Error parseando respuesta JSON",
+      }
+    }
+
+    // La respuesta puede ser un array directamente o un objeto con data
+    let guardians: any[] = []
+    if (Array.isArray(guardiansData)) {
+      guardians = guardiansData
+    } else if (guardiansData.data && Array.isArray(guardiansData.data)) {
+      guardians = guardiansData.data
+    }
+
+    return {
+      success: true,
+      guardians,
+    }
+  } catch (error) {
+    console.error(`[v0] Error obteniendo tutores de Cometa para estudiante:`, error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Error desconocido",
+    }
+  }
+}
+
+// Comparar tutores de estudiantes emparejados entre PowerSchool y Cometa
+export interface GuardianComparisonResult {
+  studentId: string
+  studentName: string
+  studentLocalId: string
+  cometaStudentId: string | null
+  powerschoolGuardians: any[]
+  cometaGuardians: any[]
+  discrepancies: {
+    onlyInPowerschool: any[]
+    onlyInCometa: any[]
+    matched: any[]
+    dataDifferences: {
+      guardianName: string
+      field: string
+      powerschoolValue: string
+      cometaValue: string
+    }[]
+  }
+  hasDiscrepancies: boolean
+}
+
+// Obtener lista de estudiantes emparejados para procesar
+export async function getMatchedStudentsListFromSession(
+  sessionId: string
+): Promise<{ 
+  success: boolean; 
+  students?: { index: number; studentId: string; studentName: string; cometaStudentId: string | null; schoolId: string }[]; 
+  error?: string 
+}> {
+  try {
+    const matchedStudents = getMatchedStudentsForComparison(sessionId)
+    
+    if (matchedStudents.length === 0) {
+      return {
+        success: false,
+        error: "No hay estudiantes emparejados en esta sesión",
+      }
+    }
+
+    // Limpiar resultados anteriores
+    clearGuardianComparisonResults(sessionId)
+
+    // Devolver lista simplificada de estudiantes para procesar
+    const students = matchedStudents.map((s, index) => ({
+      index,
+      studentId: s.partnerData?.id || s.partnerData?.student_id || "",
+      studentName: `${s.partnerData?.first_name || ""} ${s.partnerData?.last_name || ""}`.trim(),
+      studentLocalId: s.partnerData?.local_id || s.partnerData?.student_number || "-",
+      cometaStudentId: s.cometaData?.id || s.cometaData?.student_id || null,
+      schoolId: s.partnerData?.school_id || "",
+    })).filter(s => s.studentId && s.schoolId)
+
+    return {
+      success: true,
+      students,
+    }
+  } catch (error) {
+    console.error("[v0] Error en getMatchedStudentsListFromSession:", error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Error desconocido",
+    }
+  }
+}
+
+// Procesar UN estudiante individual y guardar resultado
+export async function processOneStudentGuardians(
+  tenantIntegrationId: string,
+  sessionId: string,
+  studentId: string,
+  studentName: string,
+  studentLocalId: string,
+  cometaStudentId: string | null,
+  schoolId: string,
+): Promise<{ success: boolean; hasDiscrepancies?: boolean; error?: string }> {
+  try {
+    console.log(`[v0] Procesando tutores para: ${studentName}`)
+
+    // 1. Obtener tutores de PowerSchool
+    let powerschoolGuardians: any[] = []
+    const psResult = await getGuardians(tenantIntegrationId, studentId, schoolId, "powerschool")
+    if (psResult.success && psResult.guardians) {
+      powerschoolGuardians = psResult.guardians
+    }
+
+    // 2. Obtener tutores de Cometa
+    let cometaGuardians: any[] = []
+    if (cometaStudentId) {
+      const cmResult = await getStudentGuardiansFromCometa(cometaStudentId)
+      if (cmResult.success && cmResult.guardians) {
+        cometaGuardians = cmResult.guardians
+      }
+    }
+
+    // 3. Comparar tutores
+    const comparison = compareGuardianLists(powerschoolGuardians, cometaGuardians)
+
+    const hasDiscrepancies =
+      comparison.onlyInPowerschool.length > 0 ||
+      comparison.onlyInCometa.length > 0 ||
+      comparison.dataDifferences.length > 0
+
+    // 4. Guardar resultado en SQLite
+    saveGuardianComparisonResult(sessionId, {
+      studentId,
+      studentName,
+      studentLocalId,
+      cometaStudentId,
+      powerschoolGuardians,
+      cometaGuardians,
+      discrepancies: comparison,
+      hasDiscrepancies,
+    })
+
+    return {
+      success: true,
+      hasDiscrepancies,
+    }
+  } catch (error) {
+    console.error(`[v0] Error procesando estudiante ${studentName}:`, error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Error desconocido",
+    }
+  }
+}
+
+// Función legacy para comparar tutores usando sessionId (lee de SQLite) - mantener por compatibilidad
+export async function compareStudentGuardiansFromSession(
+  tenantIntegrationId: string,
+  sessionId: string,
+): Promise<{ success: boolean; totalStudents?: number; error?: string }> {
+  try {
+    // Leer estudiantes emparejados desde SQLite
+    const matchedStudents = getMatchedStudentsForComparison(sessionId)
+    
+    if (matchedStudents.length === 0) {
+      return {
+        success: false,
+        error: "No hay estudiantes emparejados en esta sesión",
+      }
+    }
+
+    console.log(`[v0] Comparando tutores de ${matchedStudents.length} estudiantes emparejados (desde SQLite)`)
+
+    // Limpiar resultados anteriores de comparación para esta sesión
+    clearGuardianComparisonResults(sessionId)
+
+    const DELAY_BETWEEN_REQUESTS_MS = 200
+
+    for (let i = 0; i < matchedStudents.length; i++) {
+      const matchedStudent = matchedStudents[i]
+      const partnerStudent = matchedStudent.partnerData
+      const cometaStudent = matchedStudent.cometaData
+
+      if (!partnerStudent || !cometaStudent) continue
+
+      const studentName = `${partnerStudent.first_name || ""} ${partnerStudent.last_name || ""}`.trim()
+      const studentLocalId = partnerStudent.local_id || partnerStudent.student_number || "-"
+      const partnerStudentId = partnerStudent.id || partnerStudent.student_id
+      const cometaStudentId = cometaStudent?.id || cometaStudent?.student_id || null
+      const schoolId = partnerStudent.school_id
+
+      console.log(`[v0] [${i + 1}/${matchedStudents.length}] Procesando: ${studentName}`)
+
+      // 1. Obtener tutores de PowerSchool
+      let powerschoolGuardians: any[] = []
+      if (partnerStudentId && schoolId) {
+        const psResult = await getGuardians(tenantIntegrationId, partnerStudentId, schoolId, "powerschool")
+        if (psResult.success && psResult.guardians) {
+          powerschoolGuardians = psResult.guardians
+        }
+      }
+
+      // Pequeño delay para evitar rate limiting
+      await delay(DELAY_BETWEEN_REQUESTS_MS)
+
+      // 2. Obtener tutores de Cometa
+      let cometaGuardians: any[] = []
+      if (cometaStudentId) {
+        const cmResult = await getStudentGuardiansFromCometa(cometaStudentId)
+        if (cmResult.success && cmResult.guardians) {
+          cometaGuardians = cmResult.guardians
+        }
+      }
+
+      // 3. Comparar tutores
+      const comparison = compareGuardianLists(powerschoolGuardians, cometaGuardians)
+
+      // 4. Guardar resultado en SQLite
+      saveGuardianComparisonResult(sessionId, {
+        studentId: partnerStudentId,
+        studentName,
+        studentLocalId,
+        cometaStudentId,
+        powerschoolGuardians,
+        cometaGuardians,
+        discrepancies: comparison,
+        hasDiscrepancies:
+          comparison.onlyInPowerschool.length > 0 ||
+          comparison.onlyInCometa.length > 0 ||
+          comparison.dataDifferences.length > 0,
+      })
+
+      // Delay entre estudiantes
+      if (i < matchedStudents.length - 1) {
+        await delay(DELAY_BETWEEN_REQUESTS_MS)
+      }
+    }
+
+    console.log(`[v0] Comparación completada y guardada en SQLite`)
+
+    return {
+      success: true,
+      totalStudents: matchedStudents.length,
+    }
+  } catch (error) {
+    console.error("[v0] Error en compareStudentGuardiansFromSession:", error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Error desconocido",
+    }
+  }
+}
+
+// Obtener resultados de comparación de tutores desde SQLite
+export async function getGuardianComparisonResultsFromDB(
+  sessionId: string
+): Promise<{ success: boolean; results?: GuardianComparisonResult[]; error?: string }> {
+  try {
+    const results = getGuardianComparisonResults(sessionId)
+    return {
+      success: true,
+      results,
+    }
+  } catch (error) {
+    console.error("[v0] Error obteniendo resultados de comparación:", error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Error desconocido",
+    }
+  }
+}
+
+// Obtener progreso de la comparación (cuántos se han procesado)
+export async function getComparisonProgress(
+  sessionId: string
+): Promise<{ success: boolean; processed?: number; total?: number }> {
+  try {
+    const results = getGuardianComparisonResults(sessionId)
+    const matchedStudents = getMatchedStudentsForComparison(sessionId)
+    
+    return {
+      success: true,
+      processed: results.length,
+      total: matchedStudents.length,
+    }
+  } catch (error) {
+    return {
+      success: false,
+    }
+  }
+}
+
+// Verificar si hay resultados de comparación existentes para una sesión
+export async function checkExistingComparisonResults(
+  sessionId: string
+): Promise<{ 
+  success: boolean; 
+  hasResults: boolean; 
+  count?: number;
+  withDiscrepancies?: number;
+}> {
+  try {
+    const results = getGuardianComparisonResults(sessionId)
+    const withDiscrepancies = results.filter(r => r.hasDiscrepancies).length
+    
+    return {
+      success: true,
+      hasResults: results.length > 0,
+      count: results.length,
+      withDiscrepancies,
+    }
+  } catch (error) {
+    return {
+      success: false,
+      hasResults: false,
+    }
+  }
+}
+
+// Buscar la sesión más reciente que tenga resultados de comparación de tutores
+export async function findLatestComparisonResults(
+  tenantIntegrationId: string
+): Promise<{ 
+  success: boolean; 
+  hasResults: boolean; 
+  sessionId?: string;
+  count?: number;
+  withDiscrepancies?: number;
+}> {
+  try {
+    const result = getLatestSessionWithComparisonResults(tenantIntegrationId)
+    
+    if (result.sessionId) {
+      return {
+        success: true,
+        hasResults: true,
+        sessionId: result.sessionId,
+        count: result.count,
+        withDiscrepancies: result.withDiscrepancies,
+      }
+    }
+    
+    return {
+      success: true,
+      hasResults: false,
+    }
+  } catch (error) {
+    console.error("[v0] Error buscando resultados de comparación:", error)
+    return {
+      success: false,
+      hasResults: false,
+    }
+  }
+}
+
+export async function compareStudentGuardians(
+  tenantIntegrationId: string,
+  matchedStudents: MatchedStudent[],
+  onProgress?: (current: number, total: number, studentName: string) => void,
+): Promise<{ success: boolean; results?: GuardianComparisonResult[]; error?: string }> {
+  try {
+    const results: GuardianComparisonResult[] = []
+    const DELAY_BETWEEN_REQUESTS_MS = 200
+
+    // Solo procesar estudiantes que están emparejados (tienen datos en ambos sistemas)
+    const studentsToProcess = matchedStudents.filter(
+      (s) => s.matchStatus === "matched" && s.partnerData && s.cometaData
+    )
+
+    console.log(`[v0] Comparando tutores de ${studentsToProcess.length} estudiantes emparejados`)
+
+    for (let i = 0; i < studentsToProcess.length; i++) {
+      const matchedStudent = studentsToProcess[i]
+      const partnerStudent = matchedStudent.partnerData
+      const cometaStudent = matchedStudent.cometaData
+
+      const studentName = `${partnerStudent.first_name || ""} ${partnerStudent.last_name || ""}`.trim()
+      const studentLocalId = partnerStudent.local_id || partnerStudent.student_number || "-"
+      const partnerStudentId = partnerStudent.id || partnerStudent.student_id
+      const cometaStudentId = cometaStudent?.id || cometaStudent?.student_id || null
+      const schoolId = partnerStudent.school_id
+
+      if (onProgress) {
+        onProgress(i + 1, studentsToProcess.length, studentName)
+      }
+
+      console.log(`[v0] [${i + 1}/${studentsToProcess.length}] Procesando: ${studentName}`)
+
+      // 1. Obtener tutores de PowerSchool
+      let powerschoolGuardians: any[] = []
+      if (partnerStudentId && schoolId) {
+        const psResult = await getGuardians(tenantIntegrationId, partnerStudentId, schoolId, "powerschool")
+        if (psResult.success && psResult.guardians) {
+          powerschoolGuardians = psResult.guardians
+        }
+      }
+
+      // Pequeño delay para evitar rate limiting
+      await delay(DELAY_BETWEEN_REQUESTS_MS)
+
+      // 2. Obtener tutores de Cometa
+      let cometaGuardians: any[] = []
+      if (cometaStudentId) {
+        const cmResult = await getStudentGuardiansFromCometa(cometaStudentId)
+        if (cmResult.success && cmResult.guardians) {
+          cometaGuardians = cmResult.guardians
+        }
+      }
+
+      // 3. Comparar tutores
+      const comparison = compareGuardianLists(powerschoolGuardians, cometaGuardians)
+
+      results.push({
+        studentId: partnerStudentId,
+        studentName,
+        studentLocalId,
+        cometaStudentId,
+        powerschoolGuardians,
+        cometaGuardians,
+        discrepancies: comparison,
+        hasDiscrepancies:
+          comparison.onlyInPowerschool.length > 0 ||
+          comparison.onlyInCometa.length > 0 ||
+          comparison.dataDifferences.length > 0,
+      })
+
+      // Delay entre estudiantes
+      if (i < studentsToProcess.length - 1) {
+        await delay(DELAY_BETWEEN_REQUESTS_MS)
+      }
+    }
+
+    console.log(`[v0] Comparación completada. ${results.filter((r) => r.hasDiscrepancies).length} estudiantes con discrepancias`)
+
+    return {
+      success: true,
+      results,
+    }
+  } catch (error) {
+    console.error("[v0] Error en compareStudentGuardians:", error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Error desconocido",
+    }
+  }
+}
+
+// Función para calcular similitud entre dos strings (Levenshtein simplificado)
+function stringSimilarity(str1: string, str2: string): number {
+  if (!str1 || !str2) return 0
+  if (str1 === str2) return 1
+  
+  const s1 = str1.toLowerCase()
+  const s2 = str2.toLowerCase()
+  
+  if (s1 === s2) return 1
+  
+  // Si uno contiene al otro, alta similitud
+  if (s1.includes(s2) || s2.includes(s1)) return 0.9
+  
+  // Calcular distancia de edición simple
+  const longer = s1.length > s2.length ? s1 : s2
+  const shorter = s1.length > s2.length ? s2 : s1
+  
+  if (longer.length === 0) return 1
+  
+  // Contar caracteres en común
+  let matches = 0
+  const shorterChars = shorter.split('')
+  const longerChars = longer.split('')
+  
+  shorterChars.forEach(char => {
+    const idx = longerChars.indexOf(char)
+    if (idx !== -1) {
+      matches++
+      longerChars.splice(idx, 1)
+    }
+  })
+  
+  return matches / longer.length
+}
+
+// Normalizar email para comparación fuzzy
+function normalizeEmailForFuzzy(email: string): string {
+  if (!email) return ""
+  const normalized = email.toLowerCase().trim()
+  // Quitar puntos antes del @ (gmail los ignora, otros también pueden variar)
+  const [local, domain] = normalized.split("@")
+  if (!local || !domain) return normalized
+  // Quitar puntos y guiones bajos del local part
+  const cleanLocal = local.replace(/[._-]/g, "")
+  return `${cleanLocal}@${domain}`
+}
+
+// Verificar si dos emails son "fuzzy igual"
+function emailsFuzzyEqual(email1: string, email2: string): boolean {
+  if (!email1 || !email2) return false
+  
+  const norm1 = normalizeEmailForFuzzy(email1)
+  const norm2 = normalizeEmailForFuzzy(email2)
+  
+  // Comparación exacta después de normalizar
+  if (norm1 === norm2) return true
+  
+  // Comparar dominios - deben ser iguales
+  const [local1, domain1] = norm1.split("@")
+  const [local2, domain2] = norm2.split("@")
+  
+  if (domain1 !== domain2) return false
+  
+  // Si los locales son muy similares (>85%), considerar iguales
+  const similarity = stringSimilarity(local1, local2)
+  return similarity > 0.85
+}
+
+// Verificar si dos nombres son "fuzzy igual"
+function namesFuzzyEqual(name1: string, name2: string): boolean {
+  if (!name1 || !name2) return false
+  
+  const normalize = (n: string) => n
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+  
+  const n1 = normalize(name1)
+  const n2 = normalize(name2)
+  
+  if (n1 === n2) return true
+  
+  // Comparar por palabras (nombres pueden estar en diferente orden)
+  const words1 = n1.split(" ").filter(w => w.length >= 2)
+  const words2 = n2.split(" ").filter(w => w.length >= 2)
+  
+  // Si ordenados son iguales
+  if (words1.sort().join(" ") === words2.sort().join(" ")) return true
+  
+  // Si tienen al menos 2 palabras en común de 3+ caracteres
+  const commonWords = words1.filter(w => w.length >= 3 && words2.some(w2 => w === w2 || stringSimilarity(w, w2) > 0.8))
+  if (commonWords.length >= 2) return true
+  
+  // NUEVO: Detectar apellidos en común (útil para nombres abreviados como "Bucio Cuen Asist")
+  // Si comparten al menos 1 apellido Y la similitud es > 50%, considerar match
+  const commonApellidos = words1.filter(w => w.length >= 4 && words2.includes(w))
+  if (commonApellidos.length >= 1 && stringSimilarity(n1, n2) > 0.5) return true
+  
+  // NUEVO: Si uno es substring del otro (nombre abreviado)
+  if (n1.length > 5 && n2.length > 5) {
+    if (n1.includes(n2) || n2.includes(n1)) return true
+  }
+  
+  // NUEVO: Comparar iniciales + apellidos
+  // "Luis Armando Bucio Mendez" vs "L A Bucio Mendez" o "Bucio Mendez Luis"
+  const getApellidos = (words: string[]) => words.filter(w => w.length >= 4)
+  const apellidos1 = getApellidos(words1)
+  const apellidos2 = getApellidos(words2)
+  const commonApellidosStrict = apellidos1.filter(a => apellidos2.includes(a))
+  if (commonApellidosStrict.length >= 2) return true
+  
+  // Similitud general
+  return stringSimilarity(n1, n2) > 0.75
+}
+
+function compareGuardianLists(
+  psGuardians: any[],
+  cmGuardians: any[],
+): {
+  onlyInPowerschool: any[]
+  onlyInCometa: any[]
+  matched: any[]
+  dataDifferences: { guardianName: string; field: string; powerschoolValue: string; cometaValue: string }[]
+} {
+  const onlyInPowerschool: any[] = []
+  const onlyInCometa: any[] = []
+  const matched: any[] = []
+  const dataDifferences: { guardianName: string; field: string; powerschoolValue: string; cometaValue: string }[] = []
+
+  const matchedCometaIds = new Set<string>()
+
+  // Normalizar para comparación exacta
+  const normalizeForMatch = (value: string) => {
+    return (value || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  const normalizePhoneForMatch = (phone: string) => {
+    return (phone || "").replace(/\D/g, "").slice(-10)
+  }
+
+  // Para cada tutor de PowerSchool, buscar match en Cometa
+  for (const psGuardian of psGuardians) {
+    const psFirstName = normalizeForMatch(psGuardian.firstName || psGuardian.first_name || "")
+    const psLastName = normalizeForMatch(psGuardian.lastName || psGuardian.last_name || "")
+    const psFullName = `${psFirstName} ${psLastName}`.trim()
+    const psEmailRaw = psGuardian.emails || psGuardian.email || ""
+    const psEmail = normalizeForMatch(psEmailRaw)
+    const psPhoneRaw = psGuardian.phones || psGuardian.phone || ""
+    const psPhone = normalizePhoneForMatch(psPhoneRaw)
+
+    let foundMatch = false
+    let matchedCmGuardian: any = null
+
+    for (const cmGuardian of cmGuardians) {
+      const cmId = cmGuardian.id || cmGuardian.guardian_id
+      if (matchedCometaIds.has(cmId)) continue
+
+      const cmFirstName = normalizeForMatch(cmGuardian.first_name || cmGuardian.nombre || "")
+      const cmLastName = normalizeForMatch(cmGuardian.last_name || cmGuardian.apellido || "")
+      const cmFullName = `${cmFirstName} ${cmLastName}`.trim()
+      const cmEmailRaw = cmGuardian.email || ""
+      const cmEmail = normalizeForMatch(cmEmailRaw)
+      const cmPhoneRaw = cmGuardian.phone || cmGuardian.phone_number || ""
+      const cmPhone = normalizePhoneForMatch(cmPhoneRaw)
+
+      // Intentar match por teléfono, email (fuzzy) o nombre (fuzzy)
+      const phoneMatch = psPhone && cmPhone && psPhone === cmPhone
+      const emailMatch = emailsFuzzyEqual(psEmailRaw, cmEmailRaw)
+      const nameMatch = namesFuzzyEqual(psFullName, cmFullName)
+
+      if (phoneMatch || emailMatch || nameMatch) {
+        foundMatch = true
+        matchedCmGuardian = cmGuardian
+        matchedCometaIds.add(cmId)
+
+        // Verificar diferencias SIGNIFICATIVAS en datos
+        const psDisplayName = `${psGuardian.firstName || psGuardian.first_name || ""} ${psGuardian.lastName || psGuardian.last_name || ""}`.trim()
+        const cmDisplayName = `${cmGuardian.first_name || cmGuardian.nombre || ""} ${cmGuardian.last_name || cmGuardian.apellido || ""}`.trim()
+
+        // Solo reportar diferencia de nombre si NO son fuzzy iguales
+        if (!namesFuzzyEqual(psDisplayName, cmDisplayName) && psDisplayName && cmDisplayName) {
+          dataDifferences.push({
+            guardianName: psDisplayName || cmDisplayName,
+            field: "Nombre",
+            powerschoolValue: psDisplayName,
+            cometaValue: cmDisplayName,
+          })
+        }
+
+        // Solo reportar diferencia de email si NO son fuzzy iguales
+        const psDisplayEmail = psGuardian.emails || psGuardian.email || ""
+        const cmDisplayEmail = cmGuardian.email || ""
+        if (!emailsFuzzyEqual(psDisplayEmail, cmDisplayEmail) && psDisplayEmail && cmDisplayEmail) {
+          dataDifferences.push({
+            guardianName: psDisplayName || cmDisplayName,
+            field: "Email",
+            powerschoolValue: psDisplayEmail,
+            cometaValue: cmDisplayEmail,
+          })
+        }
+
+        // Solo reportar diferencia de teléfono si son realmente diferentes
+        const psDisplayPhone = psGuardian.phones || psGuardian.phone || ""
+        const cmDisplayPhone = cmGuardian.phone || cmGuardian.phone_number || ""
+        if (psPhone !== cmPhone && psDisplayPhone && cmDisplayPhone) {
+          dataDifferences.push({
+            guardianName: psDisplayName || cmDisplayName,
+            field: "Teléfono",
+            powerschoolValue: psDisplayPhone,
+            cometaValue: cmDisplayPhone,
+          })
+        }
+
+        break
+      }
+    }
+
+    if (foundMatch && matchedCmGuardian) {
+      matched.push({ powerschool: psGuardian, cometa: matchedCmGuardian })
+    } else {
+      onlyInPowerschool.push(psGuardian)
+    }
+  }
+
+  // Tutores de Cometa que no tienen match en PowerSchool
+  for (const cmGuardian of cmGuardians) {
+    const cmId = cmGuardian.id || cmGuardian.guardian_id
+    if (!matchedCometaIds.has(cmId)) {
+      onlyInCometa.push(cmGuardian)
+    }
+  }
+
+  return {
+    onlyInPowerschool,
+    onlyInCometa,
+    matched,
+    dataDifferences,
   }
 }
 
