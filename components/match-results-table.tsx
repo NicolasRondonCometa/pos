@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import * as XLSX from "xlsx"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -11,10 +11,15 @@ import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import type { MatchedStudent } from "@/app/actions/credentials"
+import { createReference, checkReferenceExists, processOneReference } from "@/app/actions/credentials"
+import { Spinner } from "@/components/ui/spinner"
+import { Link, LinkIcon } from "lucide-react"
+import { Progress } from "@/components/ui/progress"
 
 interface MatchResultsTableProps {
   results: MatchedStudent[]
   dataType?: "students" | "guardians"
+  tenantIntegrationId?: string
 }
 
 const ITEMS_PER_PAGE = 10
@@ -74,7 +79,8 @@ const getRelevantCometaFields = (data: any) => {
   const birthdate = data.birthdate ? normalizeDateForComparison(data.birthdate) : "-"
 
   return {
-    Nombre: data.first_name && data.last_name ? `${data.first_name} ${data.last_name}` : "-",
+    "ID Cometa": data.id || data.student_id || "-",
+    Nombre: data.first_name && data.last_name ? `${data.first_name} ${data.middle_name || ""} ${data.last_name}`.replace(/\s+/g, " ").trim() : "-",
     Matrícula: data.enrollment_code || "-",
     CURP: data.identifier || "-",
     "Fecha de Nacimiento": birthdate,
@@ -85,40 +91,69 @@ const getRelevantCometaFields = (data: any) => {
   }
 }
 
-const getRelevantPartnerFields = (data: any) => {
+const getRelevantPartnerFields = (data: any, cometaData?: any) => {
   if (!data) return {}
 
-  // Buscar el grado en múltiples campos posibles
-  const grade = data.grade_level || data.grade || data.gradelevel || data.current_grade || "-"
-  const dob = data.dob || data.birthdate
+  // Buscar el grado en múltiples campos posibles (nueva estructura usa grade_name)
+  const grade = data.grade_level || data.grade || data.grade_name || data.gradelevel || data.current_grade || "-"
+  const level = data.level || data.level_name || "-"
+  const dob = data.dob || data.birthdate || data.fecha_nacimiento
   const birthdate = dob ? normalizeDateForComparison(dob) : "-"
+  
+  // Construir nombre desde la nueva estructura (nombre_estudiante, apellido_estudiante)
+  // o desde la estructura antigua (first_name, last_name)
+  const firstName = data.first_name || data.nombre_estudiante || ""
+  const middleName = data.middle_name || data.segundo_nombre_estudiante || ""
+  const lastName = data.last_name || data.apellido_estudiante || ""
+  const fullName = firstName && lastName 
+    ? `${firstName} ${middleName} ${lastName}`.replace(/\s+/g, " ").trim() 
+    : "-"
+
+  // CURP: Si PowerSchool no tiene CURP pero Cometa sí (y están emparejados), mostrar el de Cometa con indicador
+  const partnerCurp = data.curp || data.state_studentnumber || ""
+  const cometaCurp = cometaData?.identifier || ""
+  let curpDisplay = "-"
+  if (partnerCurp) {
+    curpDisplay = partnerCurp
+  } else if (cometaCurp) {
+    curpDisplay = `${cometaCurp} (de Cometa)`
+  }
 
   return {
-    Nombre: data.first_name && data.last_name ? `${data.first_name} ${data.last_name}` : "-",
-    "Matrícula (Local ID)": data.local_id || "-",
-    "Student Number": data.student_number || "-",
-    CURP: data.curp || data.state_studentnumber || "-",
+    "ID PowerSchool": data.id || data.student_id || data.id_estudiante || "-",
+    Nombre: fullName,
+    "Matrícula (Local ID)": data.local_id || data.student_number || "-",
+    "Student Number": data.student_number || data.local_id || "-",
+    CURP: curpDisplay,
     "Fecha de Nacimiento": birthdate,
-    Género: data.gender || "-",
+    Género: data.gender || data.genero || "-",
     Grado: grade,
+    Nivel: level !== "-" ? level : undefined,
   }
 }
 
 const getRelevantPartnerGuardianFields = (data: any) => {
   if (!data) return {}
 
+  // Construir nombre desde múltiples posibles estructuras
+  // Nueva estructura: nombre_contacto, apellido_contacto
+  // Estructura antigua: firstName, lastName o first_name, last_name
+  const firstName = data.firstName || data.first_name || data.nombre_contacto || ""
+  const middleName = data.middleName || data.middle_name || data.segundo_nombre_contacto || ""
+  const lastName = data.lastName || data.last_name || data.apellido_contacto || ""
+  const fullName = firstName && lastName
+    ? `${firstName} ${middleName} ${lastName}`.replace(/\s+/g, " ").trim()
+    : "-"
+
   return {
-    Nombre:
-      data.firstName && data.lastName
-        ? `${data.firstName} ${data.lastName}`
-        : data.first_name && data.last_name
-          ? `${data.first_name} ${data.last_name}`
-          : "-",
-    Email: data.emails || data.email || "-",
-    Teléfono: data.phones || data.phone || "-",
-    "ID Guardian": data.id || data.guardian_id || "-",
-    "ID Estudiante Asociado (PowerSchool)": data.student_id || "-",
-    "School ID": data.school_id || "-",
+    Nombre: fullName,
+    Email: data.emails || data.email || data.email_contacto || "-",
+    Teléfono: data.phones || data.phone || data.telefono_contacto || "-",
+    Relación: data.relationship || data.relacion || "-",
+    "ID Guardian": data.id || data.guardian_id || data.id_contacto || "-",
+    "Estudiantes Asociados": Array.isArray(data.students) 
+      ? data.students.map((s: any) => s.student_name || s.student_id).join(", ") 
+      : data.student_id || "-",
   }
 }
 
@@ -126,7 +161,7 @@ const getRelevantCometaGuardianFields = (data: any) => {
   if (!data) return {}
 
   return {
-    Nombre: data.first_name && data.last_name ? `${data.first_name} ${data.last_name}` : "-",
+    Nombre: data.first_name && data.last_name ? `${data.first_name} ${data.middle_name || ""} ${data.last_name}`.replace(/\s+/g, " ").trim() : "-",
     Email: data.email || "-",
     Teléfono: data.phone || data.phone_number || "-",
     "ID Guardian": data.id || data.guardian_id || "-",
@@ -152,18 +187,35 @@ const normalizeDateForComparison = (dateStr: string): string => {
   }
 }
 
+// Función auxiliar para comparación fuzzy de nombres
+const namesFuzzyEqualForDiscrepancy = (name1: string, name2: string): boolean => {
+  if (!name1 || !name2) return false
+  const n1 = name1.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim()
+  const n2 = name2.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim()
+  if (n1 === n2) return true
+  // Si uno contiene al otro (para manejar apellido materno faltante)
+  if (n1.length > 5 && n2.length > 5 && (n1.includes(n2) || n2.includes(n1))) return true
+  // Si comparten al menos 2 palabras de 3+ caracteres
+  const words1 = n1.split(" ").filter(w => w.length >= 3)
+  const words2 = n2.split(" ").filter(w => w.length >= 3)
+  const commonWords = words1.filter(w => words2.includes(w))
+  return commonWords.length >= 2
+}
+
 const compareStudentData = (partnerData: any, cometaData: any) => {
   if (!partnerData || !cometaData) return {}
 
   const discrepancies: Record<string, { partner: string; cometa: string }> = {}
 
-  // Comparar nombres
-  const partnerName = `${partnerData.first_name || ""} ${partnerData.last_name || ""}`.trim().toLowerCase()
-  const cometaName = `${cometaData.first_name || ""} ${cometaData.last_name || ""}`.trim().toLowerCase()
-  if (partnerName && cometaName && partnerName !== cometaName) {
+  // Comparar nombres (incluyendo middle_name)
+  const partnerName = `${partnerData.first_name || ""} ${partnerData.middle_name || ""} ${partnerData.last_name || ""}`.replace(/\s+/g, " ").trim()
+  const cometaName = `${cometaData.first_name || ""} ${cometaData.middle_name || ""} ${cometaData.last_name || ""}`.replace(/\s+/g, " ").trim()
+  
+  // Solo marcar como discrepancia si NO son fuzzy iguales
+  if (partnerName && cometaName && !namesFuzzyEqualForDiscrepancy(partnerName, cometaName)) {
     discrepancies.Nombre = {
-      partner: `${partnerData.first_name || ""} ${partnerData.last_name || ""}`.trim(),
-      cometa: `${cometaData.first_name || ""} ${cometaData.last_name || ""}`.trim(),
+      partner: partnerName,
+      cometa: cometaName,
     }
   }
 
@@ -199,28 +251,42 @@ const compareStudentData = (partnerData: any, cometaData: any) => {
     }
   }
 
-  // Comparar grado
-  const partnerGrade = String(
+  // Comparar grado - normalizar quitando símbolos como "°" para que "10°" == "10"
+  const normalizeGrade = (grade: string): string => {
+    return grade
+      .replace(/°/g, "") // Quitar símbolo de grado
+      .replace(/º/g, "") // Quitar símbolo ordinal
+      .replace(/\s+/g, "") // Quitar espacios
+      .trim()
+      .toLowerCase()
+  }
+  
+  const partnerGradeRaw = String(
     partnerData.grade_level || partnerData.grade || partnerData.gradelevel || partnerData.current_grade || "",
   )
   const cometaSection = cometaData.section
-  let cometaGrade = ""
+  let cometaGradeRaw = ""
   if (cometaSection) {
     if (typeof cometaSection === "string") {
       try {
         const parsed = JSON.parse(cometaSection)
-        cometaGrade = String(parsed.grade || "")
+        cometaGradeRaw = String(parsed.grade || "")
       } catch {
         // Ignore parse errors
       }
     } else if (typeof cometaSection === "object") {
-      cometaGrade = String(cometaSection.grade || "")
+      cometaGradeRaw = String(cometaSection.grade || "")
     }
   }
-  if (partnerGrade && cometaGrade && partnerGrade !== cometaGrade) {
+  
+  // Comparar versiones normalizadas (sin símbolos)
+  const partnerGradeNorm = normalizeGrade(partnerGradeRaw)
+  const cometaGradeNorm = normalizeGrade(cometaGradeRaw)
+  
+  if (partnerGradeRaw && cometaGradeRaw && partnerGradeNorm !== cometaGradeNorm) {
     discrepancies.Grado = {
-      partner: partnerGrade,
-      cometa: cometaGrade,
+      partner: partnerGradeRaw,
+      cometa: cometaGradeRaw,
     }
   }
 
@@ -232,19 +298,15 @@ const compareGuardianData = (partnerData: any, cometaData: any) => {
 
   const discrepancies: Record<string, { partner: string; cometa: string }> = {}
 
-  // Comparar nombres
-  const partnerFirstName = (partnerData.firstName || partnerData.first_name || "").trim().toLowerCase()
-  const partnerLastName = (partnerData.lastName || partnerData.last_name || "").trim().toLowerCase()
-  const partnerName = `${partnerFirstName} ${partnerLastName}`.trim()
+  // Comparar nombres (incluyendo middle_name si existe)
+  const partnerName = `${partnerData.firstName || partnerData.first_name || ""} ${partnerData.middleName || partnerData.middle_name || ""} ${partnerData.lastName || partnerData.last_name || ""}`.replace(/\s+/g, " ").trim()
+  const cometaName = `${cometaData.first_name || cometaData.nombre || ""} ${cometaData.middle_name || ""} ${cometaData.last_name || cometaData.apellido || ""}`.replace(/\s+/g, " ").trim()
 
-  const cometaFirstName = (cometaData.first_name || cometaData.nombre || "").trim().toLowerCase()
-  const cometaLastName = (cometaData.last_name || cometaData.apellido || "").trim().toLowerCase()
-  const cometaName = `${cometaFirstName} ${cometaLastName}`.trim()
-
-  if (partnerName && cometaName && partnerName !== cometaName) {
+  // Solo marcar como discrepancia si NO son fuzzy iguales
+  if (partnerName && cometaName && !namesFuzzyEqualForDiscrepancy(partnerName, cometaName)) {
     discrepancies.Nombre = {
-      partner: `${partnerData.firstName || partnerData.first_name || ""} ${partnerData.lastName || partnerData.last_name || ""}`.trim(),
-      cometa: `${cometaData.first_name || cometaData.nombre || ""} ${cometaData.last_name || cometaData.apellido || ""}`.trim(),
+      partner: partnerName,
+      cometa: cometaName,
     }
   }
 
@@ -403,16 +465,36 @@ const getGuardianStudentDiscrepancy = (partnerData: any, cometaData: any): {
     }
   }
 
-  // 2. Verificar nombres exactos (sets iguales)
-  const areEqual = JSON.stringify(partnerNames) === JSON.stringify(cometaNames)
+  // Función para comparación fuzzy de nombres de estudiantes
+  const studentNamesFuzzyMatch = (name1: string, name2: string): boolean => {
+    if (name1 === name2) return true
+    // Si uno contiene al otro
+    if (name1.length > 5 && name2.length > 5 && (name1.includes(name2) || name2.includes(name1))) return true
+    // Si comparten al menos 2 palabras de 3+ caracteres
+    const words1 = name1.split(" ").filter(w => w.length >= 3)
+    const words2 = name2.split(" ").filter(w => w.length >= 3)
+    const commonWords = words1.filter(w => words2.includes(w))
+    return commonWords.length >= 2
+  }
+
+  // 2. Verificar si cada estudiante de PS tiene match fuzzy en Cometa
+  const unmatchedPS: string[] = []
+  const unmatchedCometa: string[] = [...cometaNames]
   
-  if (!areEqual) {
-     const inPSnotCometa = partnerNames.filter((n: string) => !cometaNames.includes(n))
-     const inCometaNotPS = cometaNames.filter((n: string) => !partnerNames.includes(n))
-     
+  for (const psName of partnerNames) {
+    const matchIndex = unmatchedCometa.findIndex(cmName => studentNamesFuzzyMatch(psName, cmName))
+    if (matchIndex >= 0) {
+      unmatchedCometa.splice(matchIndex, 1) // Remover el match encontrado
+    } else {
+      unmatchedPS.push(psName)
+    }
+  }
+  
+  // Si hay estudiantes sin match en cualquiera de los lados
+  if (unmatchedPS.length > 0 || unmatchedCometa.length > 0) {
      let details = []
-     if (inPSnotCometa.length > 0) details.push(`Solo en PS: ${inPSnotCometa.slice(0, 2).join(", ")}${inPSnotCometa.length > 2 ? "..." : ""}`)
-     if (inCometaNotPS.length > 0) details.push(`Solo en Cometa: ${inCometaNotPS.slice(0, 2).join(", ")}${inCometaNotPS.length > 2 ? "..." : ""}`)
+     if (unmatchedPS.length > 0) details.push(`Solo en PS: ${unmatchedPS.slice(0, 2).join(", ")}${unmatchedPS.length > 2 ? "..." : ""}`)
+     if (unmatchedCometa.length > 0) details.push(`Solo en Cometa: ${unmatchedCometa.slice(0, 2).join(", ")}${unmatchedCometa.length > 2 ? "..." : ""}`)
      
      syncIssue = "different"
      
@@ -428,12 +510,73 @@ const getGuardianStudentDiscrepancy = (partnerData: any, cometaData: any): {
   return { hasDiscrepancy: false, reason: null, psCount, cmCount, syncIssue: "none" }
 }
 
-export function MatchResultsTable({ results, dataType = "students" }: MatchResultsTableProps) {
+// Helper para extraer el grupo del estudiante de Cometa
+const getStudentGroup = (cometaData: any): string | null => {
+  if (!cometaData?.section) return null
+  let section = cometaData.section
+  if (typeof section === "string") {
+    try {
+      section = JSON.parse(section)
+    } catch {
+      return null
+    }
+  }
+  if (typeof section === "object" && section !== null) {
+    const group = section.group
+    // Verificar que el grupo exista y no sea vacío
+    if (group && typeof group === "string" && group.trim() !== "") {
+      return group.trim()
+    }
+    return null
+  }
+  return null
+}
+
+export function MatchResultsTable({ results, dataType = "students", tenantIntegrationId }: MatchResultsTableProps) {
   const [searchTerm, setSearchTerm] = useState("")
   const [currentPage, setCurrentPage] = useState(1)
   const [statusFilter, setStatusFilter] = useState<string>("all")
   const [selectedStudent, setSelectedStudent] = useState<MatchedStudent | null>(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
+  
+  // Filtro para excluir grupo W o sin grupo
+  const [excludeGroupW, setExcludeGroupW] = useState(true)
+  
+  // Estado para crear referencias
+  const [isCreatingReference, setIsCreatingReference] = useState(false)
+  const [referenceResult, setReferenceResult] = useState<{
+    success: boolean
+    message: string
+  } | null>(null)
+  
+  // Estado para verificar si existe referencia
+  const [isCheckingReference, setIsCheckingReference] = useState(false)
+  const [referenceStatus, setReferenceStatus] = useState<{
+    exists: boolean
+    reference?: any
+    checked: boolean
+  } | null>(null)
+  
+  // Estado para crear referencias en lote
+  const [isBulkCreating, setIsBulkCreating] = useState(false)
+  const [bulkProgress, setBulkProgress] = useState({ 
+    current: 0, 
+    total: 0, 
+    currentName: "",
+    lastAction: "" as "" | "created" | "exists" | "error",
+    lastMessage: ""
+  })
+  const [bulkResult, setBulkResult] = useState<{
+    created: number
+    skipped: number
+    failed: number
+    errors: string[]
+    details: Array<{
+      name: string
+      status: "created" | "exists" | "error"
+      message: string
+    }>
+  } | null>(null)
 
   const resultsWithDiscrepancies = useMemo(() => {
     return results.map((result) => {
@@ -498,8 +641,28 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
       })
     }
 
+    // Filtrar estudiantes con grupo W o sin grupo en Cometa
+    if (excludeGroupW && dataType === "students") {
+      filtered = filtered.filter((result) => {
+        const group = getStudentGroup(result.cometaData)
+        // Excluir si:
+        // - El estudiante está en Cometa (tiene cometaData) Y
+        // - No tiene grupo (null/vacío) O tiene grupo "W" o "w" O contiene "sin grupo"
+        if (result.cometaData) {
+          if (!group) {
+            return false // Sin grupo
+          }
+          const groupUpper = group.toUpperCase()
+          if (groupUpper === "W" || groupUpper.includes("SIN GRUPO") || groupUpper === "SIN ASIGNAR") {
+            return false // Grupo W o sin asignar
+          }
+        }
+        return true
+      })
+    }
+
     return filtered
-  }, [resultsWithDiscrepancies, searchTerm, statusFilter])
+  }, [resultsWithDiscrepancies, searchTerm, statusFilter, excludeGroupW, dataType])
 
   const totalPages = Math.ceil(filteredResults.length / ITEMS_PER_PAGE)
   const startIndex = (currentPage - 1) * ITEMS_PER_PAGE
@@ -524,6 +687,273 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
   const handleStatClick = (status: string) => {
     setStatusFilter(status)
     setCurrentPage(1)
+  }
+
+  // Navegación con teclado para el modal
+  const currentStudentIndex = selectedStudent 
+    ? filteredResults.findIndex(r => 
+        (r.partnerData?.id === selectedStudent.partnerData?.id && r.cometaData?.id === selectedStudent.cometaData?.id) ||
+        (r.partnerData?.local_id === selectedStudent.partnerData?.local_id)
+      )
+    : -1
+
+  const goToPreviousStudent = () => {
+    if (currentStudentIndex > 0) {
+      setSelectedStudent(filteredResults[currentStudentIndex - 1])
+    }
+  }
+
+  const goToNextStudent = () => {
+    if (currentStudentIndex < filteredResults.length - 1) {
+      setSelectedStudent(filteredResults[currentStudentIndex + 1])
+    }
+  }
+
+  // Escuchar teclas de flecha cuando el modal está abierto
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isModalOpen) return
+      
+      if (e.key === "ArrowLeft") {
+        e.preventDefault()
+        goToPreviousStudent()
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault()
+        goToNextStudent()
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [isModalOpen, currentStudentIndex, filteredResults])
+
+  // Limpiar resultado de referencia y verificar existencia cuando cambia el estudiante seleccionado
+  useEffect(() => {
+    setReferenceResult(null)
+    setReferenceStatus(null)
+    
+    // Verificar si existe referencia cuando se selecciona un estudiante emparejado
+    const checkReference = async () => {
+      if (!selectedStudent || 
+          !tenantIntegrationId || 
+          selectedStudent.matchStatus !== "matched" ||
+          !selectedStudent.partnerData ||
+          !selectedStudent.cometaData) {
+        return
+      }
+
+      const cometaId = selectedStudent.cometaData?.id || selectedStudent.cometaData?.student_id
+      const powerschoolId = selectedStudent.partnerData?.id || selectedStudent.partnerData?.student_id
+
+      if (!cometaId || !powerschoolId) return
+
+      setIsCheckingReference(true)
+      try {
+        const result = await checkReferenceExists({
+          tenantIntegrationId,
+          entityType: dataType === "students" ? "student" : "guardian",
+          targetEntityId: String(cometaId),
+          sourceEntityId: String(powerschoolId),
+        })
+
+        setReferenceStatus({
+          exists: result.exists,
+          reference: result.reference,
+          checked: true,
+        })
+      } catch (error) {
+        console.error("Error verificando referencia:", error)
+        setReferenceStatus({
+          exists: false,
+          checked: true,
+        })
+      } finally {
+        setIsCheckingReference(false)
+      }
+    }
+
+    checkReference()
+  }, [selectedStudent, tenantIntegrationId, dataType])
+
+  // Función para crear referencia
+  const handleCreateReference = async (student: MatchedStudent) => {
+    if (!tenantIntegrationId) {
+      setReferenceResult({
+        success: false,
+        message: "No se ha proporcionado el ID de integración del tenant",
+      })
+      return
+    }
+
+    // Obtener IDs
+    const cometaId = student.cometaData?.id || student.cometaData?.student_id
+    const powerschoolId = student.partnerData?.id || student.partnerData?.student_id
+
+    if (!cometaId || !powerschoolId) {
+      setReferenceResult({
+        success: false,
+        message: `Faltan IDs: ${!cometaId ? "ID de Cometa" : ""} ${!powerschoolId ? "ID de PowerSchool" : ""}`,
+      })
+      return
+    }
+
+    setIsCreatingReference(true)
+    setReferenceResult(null)
+
+    try {
+      const result = await createReference({
+        tenantIntegrationId,
+        entityType: dataType === "students" ? "student" : "guardian",
+        targetEntityId: cometaId,
+        sourceEntityId: powerschoolId,
+        partner: "powerschool",
+        allowUpdate: true,
+      })
+
+      if (result.success) {
+        setReferenceResult({
+          success: true,
+          message: result.message || "Referencia creada exitosamente",
+        })
+        // Actualizar el estado para mostrar que ya existe la referencia
+        setReferenceStatus({
+          exists: true,
+          reference: result.data,
+          checked: true,
+        })
+      } else {
+        setReferenceResult({
+          success: false,
+          message: result.error || "Error al crear la referencia",
+        })
+      }
+    } catch (error) {
+      setReferenceResult({
+        success: false,
+        message: error instanceof Error ? error.message : "Error inesperado",
+      })
+    } finally {
+      setIsCreatingReference(false)
+    }
+  }
+
+  // Función para crear referencias en lote para todos los emparejados
+  const handleBulkCreateReferences = async () => {
+    if (!tenantIntegrationId) {
+      alert("No se ha proporcionado el ID de integración del tenant")
+      return
+    }
+
+    // Filtrar solo estudiantes emparejados con ambos IDs
+    const matchedWithBothIds = resultsWithDiscrepancies.filter(r => {
+      if (r.matchStatus !== "matched") return false
+      const cometaId = r.cometaData?.id || r.cometaData?.student_id
+      const powerschoolId = r.partnerData?.id || r.partnerData?.student_id
+      return cometaId && powerschoolId
+    })
+
+    if (matchedWithBothIds.length === 0) {
+      alert("No hay estudiantes emparejados para crear referencias")
+      return
+    }
+
+    setIsBulkCreating(true)
+    setBulkProgress({ 
+      current: 0, 
+      total: matchedWithBothIds.length, 
+      currentName: "",
+      lastAction: "",
+      lastMessage: ""
+    })
+    setBulkResult(null)
+
+    const result = {
+      created: 0,
+      skipped: 0,
+      failed: 0,
+      errors: [] as string[],
+      details: [] as Array<{ name: string; status: "created" | "exists" | "error"; message: string }>,
+    }
+
+    // Loop en el cliente para mostrar progreso en tiempo real
+    for (let i = 0; i < matchedWithBothIds.length; i++) {
+      const r = matchedWithBothIds[i]
+      const cometaId = r.cometaData?.id || r.cometaData?.student_id
+      const powerschoolId = r.partnerData?.id || r.partnerData?.student_id
+      
+      // Construir nombre para mostrar
+      const entityName = dataType === "students"
+        ? `${r.partnerData?.first_name || ""} ${r.partnerData?.last_name || ""}`.trim() || `ID: ${powerschoolId}`
+        : `${r.partnerData?.firstName || r.partnerData?.first_name || ""} ${r.partnerData?.lastName || r.partnerData?.last_name || ""}`.trim() || `ID: ${powerschoolId}`
+
+      // Actualizar progreso antes de procesar
+      setBulkProgress({ 
+        current: i + 1, 
+        total: matchedWithBothIds.length, 
+        currentName: entityName,
+        lastAction: "",
+        lastMessage: `Procesando ${entityName}...`
+      })
+
+      try {
+        const processResult = await processOneReference({
+          tenantIntegrationId,
+          entityType: dataType === "students" ? "student" : "guardian",
+          targetEntityId: String(cometaId),
+          sourceEntityId: String(powerschoolId),
+          entityName,
+        })
+
+        // Actualizar contadores y detalles
+        if (processResult.status === "created") {
+          result.created++
+        } else if (processResult.status === "exists") {
+          result.skipped++
+        } else {
+          result.failed++
+          result.errors.push(`${entityName}: ${processResult.message}`)
+        }
+
+        result.details.push({
+          name: entityName,
+          status: processResult.status,
+          message: processResult.message,
+        })
+
+        // Actualizar progreso con el resultado
+        setBulkProgress(prev => ({ 
+          ...prev, 
+          lastAction: processResult.status,
+          lastMessage: processResult.status === "created" 
+            ? `✅ Creada: ${entityName}`
+            : processResult.status === "exists"
+              ? `⏭️ Ya existe: ${entityName}`
+              : `❌ Error: ${entityName}`
+        }))
+
+      } catch (error) {
+        result.failed++
+        const errorMsg = error instanceof Error ? error.message : "Error desconocido"
+        result.errors.push(`${entityName}: ${errorMsg}`)
+        result.details.push({
+          name: entityName,
+          status: "error",
+          message: errorMsg,
+        })
+        
+        setBulkProgress(prev => ({ 
+          ...prev, 
+          lastAction: "error",
+          lastMessage: `❌ Error: ${entityName}`
+        }))
+      }
+
+      // Pequeño delay para no saturar y permitir que la UI se actualice
+      await new Promise(resolve => setTimeout(resolve, 150))
+    }
+
+    setBulkResult(result)
+    setIsBulkCreating(false)
   }
 
   const handleDownloadExcel = () => {
@@ -660,6 +1090,72 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
     
     const today = new Date().toISOString().split('T')[0]
     XLSX.writeFile(workbook, `tutores-diferencias-estudiantes-${today}.xlsx`)
+  }
+
+  const handleDownloadDiscrepanciesDetail = () => {
+    // Filtrar solo los que tienen discrepancias
+    const discrepancyResults = resultsWithDiscrepancies.filter((r) => r.hasDiscrepancies)
+    
+    if (discrepancyResults.length === 0) return
+
+    const dataToExport: any[] = []
+
+    discrepancyResults.forEach((result) => {
+      // Calcular discrepancias para este registro
+      const discrepancies = dataType === "guardians"
+        ? compareGuardianData(result.partnerData, result.cometaData)
+        : compareStudentData(result.partnerData, result.cometaData)
+
+      const entityName = dataType === "students"
+        ? `${result.partnerData?.first_name || result.cometaData?.first_name || ""} ${result.partnerData?.middle_name || result.cometaData?.middle_name || ""} ${result.partnerData?.last_name || result.cometaData?.last_name || ""}`.replace(/\s+/g, " ").trim()
+        : `${result.partnerData?.firstName || result.partnerData?.first_name || result.cometaData?.first_name || ""} ${result.partnerData?.lastName || result.partnerData?.last_name || result.cometaData?.last_name || ""}`.trim()
+
+      const matricula = result.partnerData?.local_id || result.cometaData?.enrollment_code || "-"
+
+      // Si hay discrepancias de campos, agregar una fila por cada discrepancia
+      if (Object.keys(discrepancies).length > 0) {
+        Object.entries(discrepancies).forEach(([field, values]: [string, any]) => {
+          dataToExport.push({
+            "Nombre": entityName,
+            "Matrícula": matricula,
+            "ID PowerSchool": result.partnerData?.id || "-",
+            "ID Cometa": result.cometaData?.id || "-",
+            "Campo": field,
+            "Valor PowerSchool": values.partner || "-",
+            "Valor Cometa": values.cometa || "-",
+            "Razón de Match": result.matchReason || "-",
+          })
+        })
+      }
+    })
+
+    if (dataToExport.length === 0) {
+      console.log("[v0] No hay discrepancias de campos para exportar")
+      return
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport)
+    const columnWidths = [
+      { wch: 35 }, // Nombre
+      { wch: 12 }, // Matrícula
+      { wch: 15 }, // ID PowerSchool
+      { wch: 15 }, // ID Cometa
+      { wch: 20 }, // Campo
+      { wch: 35 }, // Valor PowerSchool
+      { wch: 35 }, // Valor Cometa
+      { wch: 20 }, // Razón de Match
+    ]
+    worksheet['!cols'] = columnWidths
+    
+    const workbook = XLSX.utils.book_new()
+    const sheetName = dataType === "students" ? "Discrepancias Estudiantes" : "Discrepancias Tutores"
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName)
+    
+    const entityType = dataType === "students" ? "estudiantes" : "tutores"
+    const today = new Date().toISOString().split('T')[0]
+    XLSX.writeFile(workbook, `discrepancias-detalle-${entityType}-${today}.xlsx`)
+    
+    console.log(`[v0] ✅ Descargadas ${dataToExport.length} discrepancias en detalle`)
   }
 
   const handleDownloadSyncIssues = () => {
@@ -837,6 +1333,17 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                       Descargar Diferencias
                     </Button>
                   )}
+                  {stats.with_discrepancies > 0 && (
+                    <Button
+                      onClick={handleDownloadDiscrepanciesDetail}
+                      variant="outline"
+                      size="sm"
+                      className="border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-700"
+                    >
+                      <Download className="h-4 w-4 mr-2" />
+                      📊 Discrepancias Detalle ({stats.with_discrepancies})
+                    </Button>
+                  )}
                   <Button
                     onClick={handleDownloadExcel}
                     variant="outline"
@@ -846,10 +1353,153 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                     <Download className="h-4 w-4 mr-2" />
                     Descargar Excel
                   </Button>
+                  
+                  {/* Botón para crear referencias en lote */}
+                  {tenantIntegrationId && stats.matched > 0 && (
+                    <Button
+                      onClick={handleBulkCreateReferences}
+                      disabled={isBulkCreating}
+                      size="sm"
+                      className="bg-galaxy-600 hover:bg-galaxy-700 text-white"
+                    >
+                      {isBulkCreating ? (
+                        <>
+                          <Spinner className="h-4 w-4 mr-2" />
+                          Creando...
+                        </>
+                      ) : (
+                        <>
+                          <LinkIcon className="h-4 w-4 mr-2" />
+                          🔗 Crear Referencias ({stats.matched})
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               )}
             </div>
           </div>
+
+          {/* Progreso y resultados de creación en lote */}
+          {(isBulkCreating || bulkResult) && (
+            <div className="mt-4 p-4 bg-neutral-50 rounded-lg border border-neutral-200">
+              {isBulkCreating && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-neutral-700">
+                      Procesando referencias...
+                    </span>
+                    <span className="text-sm font-semibold text-galaxy-600">
+                      {bulkProgress.current} / {bulkProgress.total}
+                    </span>
+                  </div>
+                  
+                  <Progress 
+                    value={bulkProgress.total > 0 ? (bulkProgress.current / bulkProgress.total) * 100 : 0} 
+                    className="h-3"
+                  />
+                  
+                  {/* Información del elemento actual */}
+                  {bulkProgress.currentName && (
+                    <div className="flex items-center gap-2 text-sm">
+                      <Spinner className="h-4 w-4" />
+                      <span className="text-neutral-600">Procesando:</span>
+                      <span className="font-medium text-neutral-900">{bulkProgress.currentName}</span>
+                    </div>
+                  )}
+                  
+                  {/* Última acción realizada */}
+                  {bulkProgress.lastMessage && (
+                    <div className={`text-sm p-2 rounded ${
+                      bulkProgress.lastAction === "created" 
+                        ? "bg-success-50 text-success-700" 
+                        : bulkProgress.lastAction === "exists"
+                          ? "bg-blue-50 text-blue-700"
+                          : bulkProgress.lastAction === "error"
+                            ? "bg-error-50 text-error-700"
+                            : "bg-neutral-100 text-neutral-600"
+                    }`}>
+                      {bulkProgress.lastMessage}
+                    </div>
+                  )}
+                </div>
+              )}
+              
+              {bulkResult && !isBulkCreating && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-semibold text-neutral-900 text-lg">
+                      ✅ Proceso completado
+                    </h4>
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      onClick={() => setBulkResult(null)}
+                      className="text-neutral-500 hover:text-neutral-700"
+                    >
+                      ✕ Cerrar
+                    </Button>
+                  </div>
+                  
+                  {/* Resumen */}
+                  <div className="grid grid-cols-3 gap-4">
+                    <div className="p-4 bg-success-50 rounded-lg border border-success-200 text-center">
+                      <p className="text-3xl font-bold text-success-700">{bulkResult.created}</p>
+                      <p className="text-sm text-success-600 font-medium">✅ Creadas</p>
+                    </div>
+                    <div className="p-4 bg-blue-50 rounded-lg border border-blue-200 text-center">
+                      <p className="text-3xl font-bold text-blue-700">{bulkResult.skipped}</p>
+                      <p className="text-sm text-blue-600 font-medium">⏭️ Ya existían</p>
+                    </div>
+                    <div className="p-4 bg-error-50 rounded-lg border border-error-200 text-center">
+                      <p className="text-3xl font-bold text-error-700">{bulkResult.failed}</p>
+                      <p className="text-sm text-error-600 font-medium">❌ Errores</p>
+                    </div>
+                  </div>
+                  
+                  {/* Detalle de todas las operaciones */}
+                  {bulkResult.details && bulkResult.details.length > 0 && (
+                    <div className="mt-3">
+                      <p className="text-sm font-medium text-neutral-700 mb-2">Detalle de operaciones:</p>
+                      <div className="max-h-48 overflow-y-auto space-y-1 bg-white rounded border border-neutral-200 p-2">
+                        {bulkResult.details.map((detail, i) => (
+                          <div 
+                            key={i} 
+                            className={`text-xs p-2 rounded flex items-center gap-2 ${
+                              detail.status === "created" 
+                                ? "bg-success-50 text-success-700" 
+                                : detail.status === "exists"
+                                  ? "bg-blue-50 text-blue-700"
+                                  : "bg-error-50 text-error-700"
+                            }`}
+                          >
+                            <span>
+                              {detail.status === "created" ? "✅" : detail.status === "exists" ? "⏭️" : "❌"}
+                            </span>
+                            <span className="font-medium">{detail.name}</span>
+                            <span className="text-neutral-500">—</span>
+                            <span>{detail.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Errores específicos */}
+                  {bulkResult.errors.length > 0 && (
+                    <div className="p-3 bg-error-50 rounded border border-error-200">
+                      <p className="text-sm font-medium text-error-700 mb-2">⚠️ Errores encontrados:</p>
+                      <ul className="text-xs text-error-600 space-y-1 max-h-32 overflow-y-auto">
+                        {bulkResult.errors.map((error, i) => (
+                          <li key={i}>• {error}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mt-4">
             <Card
@@ -1042,6 +1692,21 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                 <SelectItem value="conflict_duplicate">Conflictos</SelectItem>
               </SelectContent>
             </Select>
+
+            {/* Filtro para excluir grupo W o sin grupo */}
+            {dataType === "students" && (
+              <label className="flex items-center gap-2 px-4 h-12 border border-neutral-200 bg-white rounded-xl shadow-sm cursor-pointer hover:bg-neutral-50 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={excludeGroupW}
+                  onChange={(e) => setExcludeGroupW(e.target.checked)}
+                  className="w-4 h-4 text-galaxy-600 border-neutral-300 rounded focus:ring-galaxy-500"
+                />
+                <span className="text-sm text-neutral-700 whitespace-nowrap">
+                  Ocultar grupo W / sin grupo
+                </span>
+              </label>
+            )}
           </div>
 
           <div className="border border-neutral-200 rounded-xl overflow-hidden shadow-sm bg-white">
@@ -1109,13 +1774,13 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                       const Icon = config.icon
                       const partnerName =
                         result.partnerData?.first_name && result.partnerData?.last_name
-                          ? `${result.partnerData.first_name} ${result.partnerData.last_name}`
+                          ? `${result.partnerData.first_name} ${result.partnerData.middle_name || ""} ${result.partnerData.last_name}`.replace(/\s+/g, " ").trim()
                           : result.partnerData?.firstName && result.partnerData?.lastName
-                            ? `${result.partnerData.firstName} ${result.partnerData.lastName}`
+                            ? `${result.partnerData.firstName} ${result.partnerData.middleName || ""} ${result.partnerData.lastName}`.replace(/\s+/g, " ").trim()
                             : result.partnerData?.nombre || "-"
                       const cometaName =
                         result.cometaData?.first_name && result.cometaData?.last_name
-                          ? `${result.cometaData.first_name} ${result.cometaData.last_name}`
+                          ? `${result.cometaData.first_name} ${result.cometaData.middle_name || ""} ${result.cometaData.last_name}`.replace(/\s+/g, " ").trim()
                           : result.cometaData?.nombre || "-"
 
                       const specificData =
@@ -1355,6 +2020,34 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
 
       <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
         <DialogContent className="max-w-[98vw] lg:max-w-[90vw] max-h-[95vh] overflow-y-auto">
+          {/* Botones de navegación */}
+          <div className="flex items-center justify-between mb-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={goToPreviousStudent}
+              disabled={currentStudentIndex <= 0}
+              className="flex items-center gap-1"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Anterior
+            </Button>
+            <span className="text-sm text-neutral-500">
+              {currentStudentIndex + 1} de {filteredResults.length}
+              <span className="ml-2 text-xs text-neutral-400">(← →)</span>
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={goToNextStudent}
+              disabled={currentStudentIndex >= filteredResults.length - 1}
+              className="flex items-center gap-1"
+            >
+              Siguiente
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+
           <DialogHeader>
             <DialogTitle className="text-2xl font-lota text-neutral-900">
               {dataType === "guardians" ? "Detalles del Tutor" : "Detalles del Estudiante"}
@@ -1389,6 +2082,102 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                   </span>
                 </div>
               </div>
+
+              {/* Sección de Referencia - solo si está emparejado y tiene ambos IDs */}
+              {selectedStudent.matchStatus === "matched" && 
+               selectedStudent.partnerData && 
+               selectedStudent.cometaData &&
+               tenantIntegrationId && (
+                <div className={`p-4 rounded-lg border ${
+                  referenceStatus?.exists 
+                    ? "bg-success-50 border-success-200" 
+                    : "bg-gradient-to-r from-galaxy-50 to-aurora-50 border-galaxy-200"
+                }`}>
+                  {/* Estado de verificación */}
+                  {isCheckingReference ? (
+                    <div className="flex items-center gap-2 text-neutral-600">
+                      <Spinner className="h-4 w-4" />
+                      <span className="text-sm">Verificando referencia...</span>
+                    </div>
+                  ) : referenceStatus?.exists ? (
+                    // Ya tiene referencia
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center justify-center h-10 w-10 rounded-full bg-success-100">
+                        <Link className="h-5 w-5 text-success-600" />
+                      </div>
+                      <div className="flex-1">
+                        <h4 className="font-semibold text-success-800 text-sm flex items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4" />
+                          Referencia Ya Existe
+                        </h4>
+                        <p className="text-xs text-success-700">
+                          Este {dataType === "students" ? "estudiante" : "tutor"} ya está vinculado entre PowerSchool y Cometa
+                        </p>
+                        {referenceStatus.reference?.created_at && (
+                          <p className="text-xs text-success-600 mt-1">
+                            Creada: {new Date(referenceStatus.reference.created_at).toLocaleDateString()}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    // No tiene referencia - mostrar botón para crear
+                    <>
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex-1">
+                          <h4 className="font-semibold text-neutral-900 text-sm mb-1 flex items-center gap-2">
+                            <XCircle className="h-4 w-4 text-warning-500" />
+                            Sin Referencia
+                          </h4>
+                          <p className="text-xs text-neutral-600">
+                            Vincula este {dataType === "students" ? "estudiante" : "tutor"} de PowerSchool ({selectedStudent.partnerData?.id || selectedStudent.partnerData?.student_id}) 
+                            con Cometa ({selectedStudent.cometaData?.id || selectedStudent.cometaData?.student_id})
+                          </p>
+                        </div>
+                        <Button
+                          onClick={() => handleCreateReference(selectedStudent)}
+                          disabled={isCreatingReference}
+                          className="bg-galaxy-600 hover:bg-galaxy-700 text-white min-w-[150px]"
+                        >
+                          {isCreatingReference ? (
+                            <>
+                              <Spinner className="h-4 w-4 mr-2" />
+                              Creando...
+                            </>
+                          ) : (
+                            <>
+                              <Link className="h-4 w-4 mr-2" />
+                              Crear Referencia
+                            </>
+                          )}
+                        </Button>
+                      </div>
+
+                      {/* Resultado de la creación de referencia */}
+                      {referenceResult && (
+                        <div className={`mt-3 p-3 rounded-lg ${
+                          referenceResult.success 
+                            ? "bg-success-50 border border-success-200" 
+                            : "bg-error-50 border border-error-200"
+                        }`}>
+                          <div className="flex items-center gap-2">
+                            {referenceResult.success ? (
+                              <CheckCircle2 className="h-5 w-5 text-success-600" />
+                            ) : (
+                              <XCircle className="h-5 w-5 text-error-600" />
+                            )}
+                            <p className={`text-sm font-medium ${
+                              referenceResult.success ? "text-success-700" : "text-error-700"
+                            }`}>
+                              {referenceResult.message}
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
 
               {(() => {
                 const discrepancies = dataType === "guardians"
@@ -1533,6 +2322,27 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                       .replace(/\s+/g, " ")
                       .trim()
                   }
+
+                  // Comparación fuzzy de nombres (maneja casos donde falta apellido materno o segundo nombre)
+                  const namesFuzzyMatch = (name1: string, name2: string): boolean => {
+                    if (!name1 || !name2) return false
+                    if (name1 === name2) return true
+                    
+                    // Si uno es substring del otro (ej: "Leonardo Alvarado" está en "Leonardo Ivan Alvarado Ayala")
+                    if (name1.length > 5 && name2.length > 5) {
+                      if (name1.includes(name2) || name2.includes(name1)) return true
+                    }
+                    
+                    // Comparar por palabras
+                    const words1 = name1.split(" ").filter(w => w.length >= 2)
+                    const words2 = name2.split(" ").filter(w => w.length >= 2)
+                    
+                    // Si comparten al menos 2 palabras de 3+ caracteres
+                    const commonWords = words1.filter(w => w.length >= 3 && words2.includes(w))
+                    if (commonWords.length >= 2) return true
+                    
+                    return false
+                  }
                   
                   // Extraer apellidos (últimas 2 palabras)
                   const extractLastNames = (fullName: string) => {
@@ -1571,10 +2381,11 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                     const name = student.student_name || "-"
                     const normalized = normalizeForComparison(name)
                     
-                    // Intentar encontrar match por nombre normalizado
+                    // Intentar encontrar match por nombre (fuzzy para manejar apellido materno faltante)
                     let foundKey: string | undefined
                     for (const [key, entry] of allStudentsMap.entries()) {
-                      if (entry.normalizedName === normalized && !entry.cmData) {
+                      // Usar comparación fuzzy en lugar de exacta
+                      if (namesFuzzyMatch(entry.normalizedName, normalized) && !entry.cmData) {
                         foundKey = key
                         break
                       }
@@ -1597,23 +2408,30 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                   const onlyPsStudents = allStudents.filter(s => s.psData && !s.cmData)
                   const onlyCmStudents = allStudents.filter(s => !s.psData && s.cmData)
 
-                  // Extraer apellidos de todos los estudiantes para verificación de familia
-                  const psLastNamesList = psStudents.map((s: any) => 
-                    normalizeForComparison(extractLastNames(s.student_name || ""))
-                  ).filter(Boolean)
+                  // Extraer TODAS las palabras de los nombres (para detectar apellidos en común)
+                  const psAllWords = psStudents.flatMap((s: any) => 
+                    normalizeForComparison(s.student_name || "")
+                      .split(" ")
+                      .filter((w: string) => w.length >= 3) // Solo palabras de 3+ caracteres
+                  )
                   
-                  const cmLastNamesList = cmStudents.map((s: any) => 
-                    normalizeForComparison(extractLastNames(s.student_name || ""))
-                  ).filter(Boolean)
-
-                  // Verificar si hay apellidos en común
-                  const hasCommonLastNames = psLastNamesList.some(psLN => 
-                    cmLastNamesList.some(cmLN => psLN === cmLN)
+                  const cmAllWords = cmStudents.flatMap((s: any) => 
+                    normalizeForComparison(s.student_name || "")
+                      .split(" ")
+                      .filter((w: string) => w.length >= 3)
                   )
 
+                  // Verificar si hay palabras/apellidos en común (al menos 1 palabra de 4+ chars)
+                  const hasCommonLastNames = psAllWords.some((psWord: string) => 
+                    psWord.length >= 4 && cmAllWords.includes(psWord)
+                  )
+
+                  // Si hay estudiantes que coinciden, considerarlos de la misma familia
+                  const hasMatchedStudents = matchedStudents.length > 0
+
                   // Determinar el tipo de relación
-                  const mismatch = !hasCommonLastNames && psLastNamesList.length > 0 && cmLastNamesList.length > 0
-                  const sameFamily = hasCommonLastNames
+                  const mismatch = !hasCommonLastNames && !hasMatchedStudents && psAllWords.length > 0 && cmAllWords.length > 0
+                  const sameFamily = hasCommonLastNames || hasMatchedStudents
                   
                   return (
                     <Card className={`${mismatch ? "border-red-200 bg-red-50/30" : sameFamily ? "border-green-200 bg-green-50/30" : "border-blue-200 bg-blue-50/30"}`}>
@@ -1787,7 +2605,7 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                         {sameFamily && (
                           <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
                             <p className="text-xs text-green-800">
-                              <strong>✅ Verificación:</strong> Los apellidos coinciden ({[...new Set(psLastNamesList.concat(cmLastNamesList))].join(", ")}). 
+                              <strong>✅ Verificación:</strong> Los estudiantes coinciden o comparten apellidos. 
                               Es normal que hermanos o el mismo estudiante tengan el mismo tutor. No hay conflicto.
                             </p>
                           </div>
@@ -1809,7 +2627,7 @@ export function MatchResultsTable({ results, dataType = "students" }: MatchResul
                         {Object.entries(
                           dataType === "guardians"
                             ? getRelevantPartnerGuardianFields(selectedStudent.partnerData)
-                            : getRelevantPartnerFields(selectedStudent.partnerData),
+                            : getRelevantPartnerFields(selectedStudent.partnerData, selectedStudent.cometaData),
                         ).map(([key, value]) => (
                           <div
                             key={key}

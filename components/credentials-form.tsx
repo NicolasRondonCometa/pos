@@ -25,6 +25,8 @@ import {
   type GuardianComparisonResult,
   getGuardiansForSingleSchool, // Agregando import de getGuardiansForSingleSchool
   getGuardiansForSingleSchoolBatch,
+  getGuardiansFromLocalFile, // Leer tutores desde archivo JSON local
+  extractGuardiansFromStudents, // Extraer tutores desde nueva estructura de estudiantes
 } from "@/app/actions/credentials"
 import { Upload, ArrowLeft, CheckCircle2, Loader2, Users, UserCheck } from "lucide-react"
 import { StudentsTable } from "./students-table"
@@ -294,6 +296,13 @@ export function CredentialsForm() {
           const result = await getStudents(selectedIntegration.tenant_integration_id, schoolId)
 
           if (result.success && result.students) {
+            // DEBUG: Ver estructura de estudiantes del servidor
+            if (result.students.length > 0) {
+              console.log("[v0] 🔍 DEBUG Frontend - Primer estudiante recibido del servidor:")
+              console.log("[v0] Keys:", Object.keys(result.students[0]))
+              console.log("[v0] Datos:", JSON.stringify(result.students[0], null, 2))
+            }
+            
             const studentsWithSchool = result.students.map((student) => ({
               ...student,
               school_id: schoolId,
@@ -316,215 +325,37 @@ export function CredentialsForm() {
         }
       } else if (type === "guardians") {
         setIsLoadingPowerschool(true)
-        setLoadingMessage("Iniciando carga de tutores de PowerSchool...")
+        setLoadingMessage("📥 Obteniendo tutores desde el nuevo endpoint (contactos dentro de estudiantes)...")
 
         try {
-          const allGuardiansMap = new Map<string, any>()
-          const totalSchools = selectedSchools.length
-          const BATCH_SIZE = 50 // Procesar 50 estudiantes por lote para eficiencia
-          const MAX_STUDENTS_FOR_TEST = 999999 // Sin límite - procesar todos los estudiantes
-
-          for (let i = 0; i < selectedSchools.length; i++) {
-            const schoolId = selectedSchools[i]
-            const school = schools.find((s) => s.id === schoolId)
-            const schoolName = school?.name || `Escuela ${schoolId}`
-
-            setLoadingMessage(
-              `📚 Escuela ${i + 1}/${totalSchools}: ${schoolName}\n\n` +
-                `🔍 Obteniendo lista de estudiantes...\n\n` +
-                `💡 El proceso se realiza en lotes de ${BATCH_SIZE} estudiantes\n` +
-                `📊 La barra se actualizará cada lote completado`,
-            )
-            console.log(`[v0] [${i + 1}/${totalSchools}] Procesando ${schoolName}`)
-
-            const startTime = Date.now()
-            let isComplete = false
-            let startIndex = 0
-            let guardiansMapForSchool: Record<string, any> = {}
-
-            console.log(`[v0] 🚀 CLIENT: Iniciando procesamiento por lotes para escuela ${schoolId}`)
-
-            // Procesar en lotes hasta completar todos los estudiantes
-            let batchNumber = 1
-            let totalStudentsKnown = 0
-            
-            // Inicializar la barra de progreso desde el inicio
-            setGuardiansProgress({
-              currentSchool: schoolId,
-              currentSchoolName: schoolName,
-              schoolIndex: i + 1,
-              totalSchools,
-              currentStudent: 0,
-              totalStudents: 1, // Se actualizará con el valor real
-              totalGuardians: allGuardiansMap.size,
-              isLoadingComplete: false,
-            })
-            
-            while (!isComplete) { // Procesar todos los estudiantes sin límite
-              console.log(`[v0] 🔵 CLIENT: Llamando batch con startIndex=${startIndex}, BATCH_SIZE=${BATCH_SIZE}`)
-              
-              // Actualizar progreso antes del lote
-              if (totalStudentsKnown > 0) {
-                setGuardiansProgress({
-                  currentSchool: schoolId,
-                  currentSchoolName: schoolName,
-                  schoolIndex: i + 1,
-                  totalSchools,
-                  currentStudent: startIndex,
-                  totalStudents: totalStudentsKnown,
-                  totalGuardians: allGuardiansMap.size + Object.keys(guardiansMapForSchool).length,
-                  isLoadingComplete: false,
-                })
-              }
-
-              // Mensaje mientras procesa el lote
-              setLoadingMessage(
-                `📚 Escuela ${i + 1}/${totalSchools}: ${schoolName}\n\n` +
-                  `⏳ Procesando lote ${batchNumber}...\n` +
-                  `🔄 Obteniendo tutores de ${BATCH_SIZE} estudiantes\n` +
-                  `⚠️ Esto puede tomar unos segundos...\n\n` +
-                  `💡 La barra se actualizará al completar este lote`,
-              )
-
-              const result = await getGuardiansForSingleSchoolBatch(
-                selectedIntegration.tenant_integration_id,
-                schoolId,
-                "powerschool",
-                startIndex,
-                BATCH_SIZE,
-                guardiansMapForSchool,
-              )
-
-              console.log(
-                `[v0] 🟢 CLIENT: Resultado batch recibido - success: ${result.success}, processedCount: ${result.processedCount}, totalStudents: ${result.totalStudents}, isComplete: ${result.isComplete}`,
-              )
-
-              batchNumber++
-
-              if (!result.success) {
-                console.error(`[v0] Error en escuela ${schoolName}:`, result.error)
-                setLoadingMessage(
-                  `❌ Error en escuela ${i + 1}/${totalSchools}: ${schoolName}\n` +
-                    `⚠️ ${result.error || "Error desconocido"}\n` +
-                    `Continuando con la siguiente escuela...`,
-                )
-                await new Promise((resolve) => setTimeout(resolve, 2000))
-                break
-              }
-
-              // Actualizar el mapa de tutores con los nuevos resultados
-              if (result.guardians) {
-                result.guardians.forEach((guardian: any) => {
-                  const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
-                  if (guardianId) {
-                    guardiansMapForSchool[guardianId] = guardian
-                  }
-                })
-              }
-
-              const totalStudents = result.totalStudents || 1
-              const processedCount = result.processedCount || 0
-              isComplete = result.isComplete || false
-              
-              // Guardar el total de estudiantes la primera vez
-              if (totalStudentsKnown === 0) {
-                totalStudentsKnown = totalStudents
-              }
-
-              // Actualizar progreso con datos reales
-              setGuardiansProgress({
-                currentSchool: schoolId,
-                currentSchoolName: schoolName,
-                schoolIndex: i + 1,
-                totalSchools,
-                currentStudent: processedCount,
-                totalStudents: totalStudentsKnown, // Total real de estudiantes
-                totalGuardians: allGuardiansMap.size + Object.keys(guardiansMapForSchool).length,
-                isLoadingComplete: false,
-              })
-
-              const progressPercentage = Math.round((processedCount / totalStudentsKnown) * 100)
-              const remainingStudents = totalStudentsKnown - processedCount
-
-              setLoadingMessage(
-                `📚 Escuela ${i + 1}/${totalSchools}: ${schoolName}\n\n` +
-                  `✅ Lote ${batchNumber - 1} completado!\n\n` +
-                  `📊 Progreso: ${processedCount}/${totalStudentsKnown} estudiantes (${progressPercentage}%)\n` +
-                  `👨‍👩‍👧 ${Object.keys(guardiansMapForSchool).length} tutores únicos encontrados\n` +
-                  `⏱️ Faltan ${remainingStudents} estudiantes\n\n` +
-                  (isComplete ? `🎉 ¡Escuela completada!` : `🔄 Preparando siguiente lote...`),
-              )
-
-              startIndex += BATCH_SIZE
-              
-              // Dar un pequeño respiro visual antes del siguiente lote
-              if (!isComplete) {
-                await new Promise((resolve) => setTimeout(resolve, 500))
-              }
-            }
-
-            // Al completar la escuela, agregar todos los tutores únicos al mapa global
-            Object.values(guardiansMapForSchool).forEach((guardian: any) => {
-              const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
-              if (guardianId) {
-                if (allGuardiansMap.has(guardianId)) {
-                  // Merge existing guardian with new students
-                  const existingGuardian = allGuardiansMap.get(guardianId)
-                  const existingStudents = existingGuardian.students || []
-                  const newStudents = guardian.students || []
-                  
-                  // Add new students avoiding duplicates
-                  newStudents.forEach((newS: any) => {
-                    if (!existingStudents.some((exS: any) => exS.student_id === newS.student_id)) {
-                      existingStudents.push(newS)
-                    }
-                  })
-                  
-                  existingGuardian.students = existingStudents
-                  allGuardiansMap.set(guardianId, existingGuardian)
-                } else {
-                  allGuardiansMap.set(guardianId, guardian)
-                }
-              }
-            })
-            
-            const currentAllGuardians = Array.from(allGuardiansMap.values())
-            setPowerschoolData([...currentAllGuardians])
-
-            const endTime = Date.now()
-            const durationSeconds = Math.round((endTime - startTime) / 1000)
-
-            console.log(
-              `[v0] [${i + 1}/${totalSchools}] ${schoolName}: ${Object.keys(guardiansMapForSchool).length} tutores (total acumulado: ${currentAllGuardians.length})`,
-            )
-
-            setLoadingMessage(
-              `✅ Escuela ${i + 1}/${totalSchools} completada: ${schoolName}\n\n` +
-                `👥 Todos los estudiantes procesados\n` +
-                `👨‍👩‍👧 ${Object.keys(guardiansMapForSchool).length} tutores únicos encontrados\n` +
-                `⏱️ Tiempo: ${durationSeconds}s\n` +
-                `📊 Total acumulado: ${currentAllGuardians.length} tutores`,
-            )
-
-            // Dar un momento para que el usuario vea el mensaje de completado
-            if (i < totalSchools - 1) {
-              await new Promise((resolve) => setTimeout(resolve, 1500))
-            }
+          console.log("[v0] 🚀 Iniciando carga de tutores desde nuevo endpoint con estructura estudiante.contacts")
+          
+          // Obtener estudiantes que incluyen sus contactos
+          const studentsResult = await getStudents(selectedIntegration.tenant_integration_id)
+          
+          if (!studentsResult.success || !studentsResult.students) {
+            throw new Error(studentsResult.error || "Error obteniendo estudiantes")
           }
-
-          const allGuardians = Array.from(allGuardiansMap.values())
+          
+          const studentsWithContacts = studentsResult.students
+          console.log(`[v0] 📊 Obtenidos ${studentsWithContacts.length} estudiantes con sus contactos`)
+          
+          // Extraer tutores de los contactos de los estudiantes
+          const allGuardians = await extractGuardiansFromStudents(studentsWithContacts)
+          console.log(`[v0] ✅ ${allGuardians.length} tutores extraídos de la nueva estructura`)
+          
           setIsLoadingPowerschool(false)
           setGuardiansProgress(null)
           setPowerschoolData(allGuardians)
           setLoadingMessage(
-            `🎉 ¡Proceso completado!\n\n` +
-              `📚 ${totalSchools} escuelas procesadas\n` +
-              `👨‍👩‍👧 ${allGuardians.length} tutores totales cargados`,
+            `🎉 ¡Carga completada!\n\n` +
+              `📥 Datos cargados desde API\n` +
+              `👨‍👩‍👧 ${allGuardians.length} tutores únicos extraídos\n` +
+              `👦 De ${studentsWithContacts.length} estudiantes con contactos`,
           )
-          console.log(`[v0] Total tutores de PowerSchool cargados:`, allGuardians.length)
 
           // Dar un momento para mostrar el mensaje final antes de cargar Cometa
-          await new Promise((resolve) => setTimeout(resolve, 1500))
+          await new Promise((resolve) => setTimeout(resolve, 1000))
 
           if (tenantId) {
             loadCometaGuardians(tenantId)
@@ -532,8 +363,8 @@ export function CredentialsForm() {
         } catch (err) {
           setIsLoadingPowerschool(false)
           setGuardiansProgress(null)
-          setError("Error al obtener tutores de PowerSchool")
-          console.error("[v0] Error loading PowerSchool guardians:", err)
+          setError("Error al cargar tutores: " + (err instanceof Error ? err.message : "Error desconocido"))
+          console.error("[v0] Error loading PowerSchool guardians from API:", err)
         }
 
         setSchoolsProgress([])
@@ -1501,7 +1332,11 @@ export function CredentialsForm() {
           </Alert>
         )}
 
-        <MatchResultsTable results={matchResults} dataType={dataType || "students"} />
+        <MatchResultsTable 
+          results={matchResults} 
+          dataType={dataType || "students"} 
+          tenantIntegrationId={selectedIntegration?.tenant_integration_id}
+        />
 
         <div className="flex justify-end gap-3 flex-wrap">
           {/* Botón para ver resultados de comparación existentes */}

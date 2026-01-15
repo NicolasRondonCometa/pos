@@ -542,8 +542,9 @@ export async function matchStudents(
         }
       } else if (rule.id === "name_dob") {
         const partnerFirstName = partnerStudent.first_name || partnerStudent.nombre || ""
+        const partnerMiddleName = partnerStudent.middle_name || ""
         const partnerLastName = partnerStudent.last_name || partnerStudent.apellido || ""
-        const partnerFullName = normalizeFullName(partnerFirstName, partnerLastName)
+        const partnerFullName = normalizeFullName(partnerFirstName, partnerLastName, partnerMiddleName)
         const partnerDob = normalizeDate(partnerStudent.dob || partnerStudent.fecha_nacimiento || "")
 
         console.log(
@@ -553,12 +554,17 @@ export async function matchStudents(
         if (partnerFullName && partnerDob) {
           const cometaMatch = cometaStudents.find((cs) => {
             const cometaFirstName = cs.first_name || cs.nombre || ""
+            const cometaMiddleName = cs.middle_name || ""
             const cometaLastName = cs.last_name || cs.apellido || ""
-            const cometaFullName = normalizeFullName(cometaFirstName, cometaLastName)
+            const cometaFullName = normalizeFullName(cometaFirstName, cometaLastName, cometaMiddleName)
             const cometaDob = normalizeDate(cs.birthdate || cs.fecha_nacimiento || "")
 
+            // Usar comparación fuzzy para nombres (maneja casos donde falta apellido materno)
+            // En algunos colegios PowerSchool no tiene el apellido materno pero Cometa sí
+            const namesMatch = namesFuzzyEqual(partnerFullName, cometaFullName)
+
             return (
-              cometaFullName === partnerFullName &&
+              namesMatch &&
               cometaDob === partnerDob &&
               !matchedCometaIds.has(cs.id || cs.student_id)
             )
@@ -838,7 +844,7 @@ export async function getAllGuardiansForSchools(
             const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
             const studentInfo = {
               student_id: studentId,
-              student_name: `${student.first_name || ""} ${student.last_name || ""}`.trim() || "-",
+              student_name: `${student.first_name || ""} ${student.middle_name || ""} ${student.last_name || ""}`.replace(/\s+/g, " ").trim() || "-",
               student_local_id: student.local_id || student.student_number || "-",
             }
             
@@ -1007,7 +1013,7 @@ export async function getCometaGuardians(
             const guardianId = guardian.id || guardian.email || guardian.phone
             const studentInfo = {
               student_id: studentId,
-              student_name: `${student.first_name || ""} ${student.last_name || ""}`.trim() || "-",
+              student_name: `${student.first_name || ""} ${student.middle_name || ""} ${student.last_name || ""}`.replace(/\s+/g, " ").trim() || "-",
               student_identifier: student.identifier || student.enrollment_code || "-",
             }
             
@@ -1334,24 +1340,22 @@ function normalizeString(value: any): string {
     .trim()
 }
 
-function normalizeFullName(firstName: any, lastName: any): string {
+function normalizeFullName(firstName: any, lastName: any, middleName?: any): string {
   const first = String(firstName || "")
+  const middle = String(middleName || "")
   const last = String(lastName || "")
 
   // Normalizar sin acentos y colapsar espacios
-  const normalizedFirst = first
+  const normalize = (str: string) => str
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim()
 
-  const normalizedLast = last
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim()
+  const normalizedFirst = normalize(first)
+  const normalizedMiddle = normalize(middle)
+  const normalizedLast = normalize(last)
 
   // Aplicar Title-Case
   const titleCase = (str: string) => {
@@ -1360,6 +1364,10 @@ function normalizeFullName(firstName: any, lastName: any): string {
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(" ")
   }
+  
+  // Construir nombre completo incluyendo middle name si existe
+  const parts = [normalizedFirst, normalizedMiddle, normalizedLast].filter(Boolean)
+  return parts.map(titleCase).join(" ").replace(/\s+/g, " ").trim()
 
   return `${titleCase(normalizedFirst)} ${titleCase(normalizedLast)}`.trim()
 }
@@ -1399,6 +1407,125 @@ function normalizePhone(value: any): string {
   
   // Devolver solo los últimos 10 dígitos (número local) para matching consistente
   return cleaned.slice(-10)
+}
+
+// Leer tutores de PowerSchool desde archivo JSON local
+export async function getGuardiansFromLocalFile(): Promise<{
+  success: boolean
+  guardians?: any[]
+  error?: string
+  totalContacts?: number
+}> {
+  try {
+    const fs = await import("fs/promises")
+    const path = await import("path")
+    
+    const filePath = path.join(process.cwd(), "data", "powerschool_contacts.json")
+    console.log("[v0] 📂 Leyendo tutores desde archivo local:", filePath)
+    
+    const fileContent = await fs.readFile(filePath, "utf-8")
+    const contacts = JSON.parse(fileContent)
+    
+    console.log(`[v0] 📊 Total de contactos en el archivo: ${contacts.length}`)
+    
+    // Agrupar contactos por ID de tutor (un tutor puede tener múltiples estudiantes)
+    const guardiansMap = new Map<string, any>()
+    
+    for (const contact of contacts) {
+      const person = contact.tables?.person
+      const phone = contact.tables?.phonenumber
+      const email = contact.tables?.emailaddress
+      const student = contact.tables?.students
+      
+      if (!person?.id_contacto) continue
+      
+      const guardianId = person.id_contacto
+      
+      // Info del estudiante asociado
+      const studentInfo = student ? {
+        student_id: student.id_estudiante,
+        student_name: `${student.nombre_estudiante || ""} ${student.segundo_nombre_estudiante || ""} ${student.apellido_estudiante || ""}`.replace(/\s+/g, " ").trim(),
+        student_local_id: student.id_estudiante,
+        school_id: student.schoolid,
+        grade: student.grade_name,
+        level: student.level_name,
+        enroll_status: student.enroll_status,
+      } : null
+      
+      if (!guardiansMap.has(guardianId)) {
+        // Crear nuevo tutor
+        guardiansMap.set(guardianId, {
+          id: guardianId,
+          guardian_id: guardianId,
+          firstName: person.nombre_contacto || "",
+          first_name: person.nombre_contacto || "",
+          middleName: person.segundo_nombre_contacto || "",
+          middle_name: person.segundo_nombre_contacto || "",
+          lastName: person.apellido_contacto || "",
+          last_name: person.apellido_contacto || "",
+          emails: email?.email_contacto || "",
+          email: email?.email_contacto || "",
+          phones: phone?.telefono_contacto || "",
+          phone: phone?.telefono_contacto || "",
+          relationship: person.relacion || "",
+          students: studentInfo ? [studentInfo] : [],
+        })
+      } else {
+        // Agregar estudiante al tutor existente
+        const existingGuardian = guardiansMap.get(guardianId)
+        if (studentInfo && !existingGuardian.students.some((s: any) => s.student_id === studentInfo.student_id)) {
+          existingGuardian.students.push(studentInfo)
+        }
+      }
+    }
+    
+    const guardians = Array.from(guardiansMap.values())
+    console.log(`[v0] ✅ Tutores únicos procesados: ${guardians.length}`)
+    
+    // Optimizar datos - solo enviar campos mínimos necesarios para matching
+    const slimGuardians = guardians.map(g => ({
+      id: g.id,
+      guardian_id: g.guardian_id,
+      firstName: g.firstName,
+      first_name: g.first_name,
+      middleName: g.middleName,
+      middle_name: g.middle_name,
+      lastName: g.lastName,
+      last_name: g.last_name,
+      emails: g.emails,
+      email: g.email,
+      phones: g.phones,
+      phone: g.phone,
+      relationship: g.relationship,
+      // Solo incluir info básica de estudiantes
+      students: (g.students || []).map((s: any) => ({
+        student_id: s.student_id,
+        student_name: s.student_name,
+        student_local_id: s.student_local_id,
+      })),
+    }))
+    
+    // Log de muestra
+    if (slimGuardians.length > 0) {
+      console.log("[v0] 🔍 Ejemplo de tutor procesado:", JSON.stringify(slimGuardians[0]).substring(0, 300))
+    }
+    
+    // Calcular tamaño aproximado
+    const dataSize = JSON.stringify(slimGuardians).length
+    console.log(`[v0] 📦 Tamaño de datos: ~${(dataSize / 1024 / 1024).toFixed(2)} MB`)
+    
+    return {
+      success: true,
+      guardians: slimGuardians,
+      totalContacts: contacts.length,
+    }
+  } catch (error) {
+    console.error("[v0] ❌ Error leyendo archivo de tutores:", error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Error leyendo archivo de tutores",
+    }
+  }
 }
 
 export async function getGuardiansForSingleSchoolBatch(
@@ -1461,7 +1588,7 @@ export async function getGuardiansForSingleSchoolBatch(
           const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
           const studentInfo = {
             student_id: studentId,
-            student_name: `${student.first_name || ""} ${student.last_name || ""}`.trim() || "-",
+            student_name: `${student.first_name || ""} ${student.middle_name || ""} ${student.last_name || ""}`.replace(/\s+/g, " ").trim() || "-",
             student_local_id: student.local_id || student.student_number || "-",
           }
           
@@ -1620,7 +1747,7 @@ export async function getMatchedStudentsListFromSession(
     const students = matchedStudents.map((s, index) => ({
       index,
       studentId: s.partnerData?.id || s.partnerData?.student_id || "",
-      studentName: `${s.partnerData?.first_name || ""} ${s.partnerData?.last_name || ""}`.trim(),
+      studentName: `${s.partnerData?.first_name || ""} ${s.partnerData?.middle_name || ""} ${s.partnerData?.last_name || ""}`.replace(/\s+/g, " ").trim(),
       studentLocalId: s.partnerData?.local_id || s.partnerData?.student_number || "-",
       cometaStudentId: s.cometaData?.id || s.cometaData?.student_id || null,
       schoolId: s.partnerData?.school_id || "",
@@ -1731,7 +1858,7 @@ export async function compareStudentGuardiansFromSession(
 
       if (!partnerStudent || !cometaStudent) continue
 
-      const studentName = `${partnerStudent.first_name || ""} ${partnerStudent.last_name || ""}`.trim()
+      const studentName = `${partnerStudent.first_name || ""} ${partnerStudent.middle_name || ""} ${partnerStudent.last_name || ""}`.replace(/\s+/g, " ").trim()
       const studentLocalId = partnerStudent.local_id || partnerStudent.student_number || "-"
       const partnerStudentId = partnerStudent.id || partnerStudent.student_id
       const cometaStudentId = cometaStudent?.id || cometaStudent?.student_id || null
@@ -1922,7 +2049,7 @@ export async function compareStudentGuardians(
       const partnerStudent = matchedStudent.partnerData
       const cometaStudent = matchedStudent.cometaData
 
-      const studentName = `${partnerStudent.first_name || ""} ${partnerStudent.last_name || ""}`.trim()
+      const studentName = `${partnerStudent.first_name || ""} ${partnerStudent.middle_name || ""} ${partnerStudent.last_name || ""}`.replace(/\s+/g, " ").trim()
       const studentLocalId = partnerStudent.local_id || partnerStudent.student_number || "-"
       const partnerStudentId = partnerStudent.id || partnerStudent.student_id
       const cometaStudentId = cometaStudent?.id || cometaStudent?.student_id || null
@@ -2240,6 +2367,348 @@ function compareGuardianLists(
   }
 }
 
+// Crear una referencia entre una entidad de Cometa y una de PowerSchool
+export interface CreateReferenceParams {
+  tenantIntegrationId: string
+  entityType: "student" | "guardian"
+  targetEntityId: string // ID de Cometa
+  sourceEntityId: string // ID de PowerSchool
+  partner?: string
+  sourceContext?: any
+  allowUpdate?: boolean
+}
+
+export interface CreateReferenceResponse {
+  success: boolean
+  message?: string
+  error?: string
+  data?: any
+}
+
+// Verificar si ya existe una referencia para una entidad
+export interface CheckReferenceParams {
+  tenantIntegrationId: string
+  entityType: "student" | "guardian"
+  targetEntityId: string // ID de Cometa
+  sourceEntityId: string // ID de PowerSchool
+}
+
+export interface CheckReferenceResponse {
+  success: boolean
+  exists: boolean
+  reference?: any
+  error?: string
+}
+
+export async function checkReferenceExists(params: CheckReferenceParams): Promise<CheckReferenceResponse> {
+  try {
+    if (!COMETA_AUTH_TOKEN) {
+      return {
+        success: false,
+        exists: false,
+        error: "Token no configurado",
+      }
+    }
+
+    const {
+      tenantIntegrationId,
+      entityType,
+      targetEntityId,
+      sourceEntityId,
+    } = params
+
+    // Construir URL con query params
+    const queryParams = new URLSearchParams({
+      tenant_integration_id: tenantIntegrationId,
+      entity_type: entityType,
+      target_entity_id: String(targetEntityId),
+      source_entity_id: String(sourceEntityId),
+      partner: "powerschool",
+    })
+
+    const referenceUrl = `${API_BASE_URL}/shared/api/v1/references/?${queryParams.toString()}`
+    console.log("[v0] Verificando referencia existente:", referenceUrl)
+
+    const response = await fetch(referenceUrl, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        Authorization: `Bearer ${COMETA_AUTH_TOKEN}`,
+        "ngrok-skip-browser-warning": "true",
+        "User-Agent": "v0-integration-app",
+      },
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error("[v0] Error verificando referencia:", errorText)
+      return {
+        success: false,
+        exists: false,
+        error: `Error HTTP ${response.status}`,
+      }
+    }
+
+    const data = await response.json()
+    
+    // La respuesta tiene formato { error: false, message: "...", data: { items: [...], metadata: {...} } }
+    const references = data?.data?.items || data?.data?.references || []
+    const hasReference = Array.isArray(references) && references.length > 0
+
+    console.log("[v0] Referencia encontrada:", hasReference, references.length > 0 ? references[0] : null)
+
+    return {
+      success: true,
+      exists: hasReference,
+      reference: hasReference ? references[0] : undefined,
+    }
+  } catch (error) {
+    console.error("[v0] Error en checkReferenceExists:", error)
+    return {
+      success: false,
+      exists: false,
+      error: error instanceof Error ? error.message : "Error desconocido",
+    }
+  }
+}
+
+// Procesar una sola referencia: verificar si existe y crear si no
+export interface ProcessSingleReferenceParams {
+  tenantIntegrationId: string
+  entityType: "student" | "guardian"
+  targetEntityId: string // ID de Cometa
+  sourceEntityId: string // ID de PowerSchool
+  entityName?: string // Nombre para mostrar en logs
+}
+
+export interface ProcessSingleReferenceResult {
+  success: boolean
+  status: "created" | "exists" | "error"
+  message: string
+  sourceEntityId: string
+  targetEntityId: string
+}
+
+export async function processOneReference(params: ProcessSingleReferenceParams): Promise<ProcessSingleReferenceResult> {
+  const { tenantIntegrationId, entityType, targetEntityId, sourceEntityId, entityName } = params
+  const sourceId = String(sourceEntityId)
+  const targetId = String(targetEntityId)
+  const displayName = entityName || `${sourceId} -> ${targetId}`
+
+  console.log(`[v0] Procesando referencia: ${displayName}`)
+
+  try {
+    // Primero verificar si ya existe
+    const checkResult = await checkReferenceExists({
+      tenantIntegrationId,
+      entityType,
+      targetEntityId: targetId,
+      sourceEntityId: sourceId,
+    })
+
+    if (checkResult.exists) {
+      console.log(`[v0] ⏭️ Ya existe: ${displayName}`)
+      return {
+        success: true,
+        status: "exists",
+        message: "Ya existe",
+        sourceEntityId: sourceId,
+        targetEntityId: targetId,
+      }
+    }
+
+    // Crear la referencia
+    const createResult = await createReference({
+      tenantIntegrationId,
+      entityType,
+      targetEntityId: targetId,
+      sourceEntityId: sourceId,
+      partner: "powerschool",
+      allowUpdate: true,
+    })
+
+    if (createResult.success) {
+      console.log(`[v0] ✅ Creada: ${displayName}`)
+      return {
+        success: true,
+        status: "created",
+        message: "Creada exitosamente",
+        sourceEntityId: sourceId,
+        targetEntityId: targetId,
+      }
+    } else {
+      console.error(`[v0] ❌ Error: ${displayName} - ${createResult.error}`)
+      return {
+        success: false,
+        status: "error",
+        message: createResult.error || "Error desconocido",
+        sourceEntityId: sourceId,
+        targetEntityId: targetId,
+      }
+    }
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : "Error desconocido"
+    console.error(`[v0] ❌ Excepción: ${displayName} - ${errorMsg}`)
+    return {
+      success: false,
+      status: "error",
+      message: errorMsg,
+      sourceEntityId: sourceId,
+      targetEntityId: targetId,
+    }
+  }
+}
+
+export async function createReference(params: CreateReferenceParams): Promise<CreateReferenceResponse> {
+  try {
+    if (!COMETA_AUTH_TOKEN) {
+      console.error("[v0] COMETA_AUTH_TOKEN no está configurado")
+      return {
+        success: false,
+        error: "Token de autenticación no configurado. Por favor, configura COMETA_AUTH_TOKEN en las variables de entorno.",
+      }
+    }
+
+    const {
+      tenantIntegrationId,
+      entityType,
+      targetEntityId,
+      sourceEntityId,
+      partner = "powerschool",
+      sourceContext = null,
+      allowUpdate = true,
+    } = params
+
+    if (!tenantIntegrationId || !targetEntityId || !sourceEntityId) {
+      return {
+        success: false,
+        error: "Faltan parámetros requeridos: tenantIntegrationId, targetEntityId, o sourceEntityId",
+      }
+    }
+
+    const referenceUrl = `${API_BASE_URL}/shared/api/v1/references/`
+    
+    // Asegurar que los IDs sean strings (la API lo requiere)
+    const targetIdString = String(targetEntityId)
+    const sourceIdString = String(sourceEntityId)
+    
+    console.log("[v0] Creando referencia en:", referenceUrl)
+    console.log("[v0] Payload:", {
+      tenant_integration_id: tenantIntegrationId,
+      entity_type: entityType,
+      target_entity_id: targetIdString,
+      source_entity_id: sourceIdString,
+      partner,
+    })
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 30000)
+
+    let response: Response
+    try {
+      response = await fetch(referenceUrl, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          Authorization: `Bearer ${COMETA_AUTH_TOKEN}`,
+          "Content-Type": "application/json",
+          "ngrok-skip-browser-warning": "true",
+          "User-Agent": "v0-integration-app",
+        },
+        body: JSON.stringify({
+          tenant_integration_id: tenantIntegrationId,
+          entity_type: entityType,
+          target_entity_id: targetIdString,
+          source_entity_id: sourceIdString,
+          partner: partner,
+          source_context: sourceContext,
+          allow_update: allowUpdate,
+        }),
+        signal: controller.signal,
+      })
+      clearTimeout(timeoutId)
+    } catch (fetchError) {
+      clearTimeout(timeoutId)
+      console.error("[v0] Error en fetch de createReference:", fetchError)
+
+      if (fetchError instanceof Error) {
+        if (fetchError.name === "AbortError") {
+          return {
+            success: false,
+            error: "La solicitud tardó demasiado tiempo. Verifica que la API esté disponible.",
+          }
+        }
+      }
+      return {
+        success: false,
+        error: fetchError instanceof Error ? fetchError.message : "Error de conexión desconocido",
+      }
+    }
+
+    console.log("[v0] Response status:", response.status)
+
+    const responseText = await response.text()
+    console.log("[v0] Response text:", responseText.substring(0, 300))
+
+    if (!response.ok) {
+      let errorMessage = "Error al crear la referencia"
+      try {
+        const errorData = JSON.parse(responseText)
+        
+        // Manejar formato de error de FastAPI/Pydantic (detail como array)
+        if (Array.isArray(errorData.detail)) {
+          const messages = errorData.detail.map((err: any) => {
+            const field = err.loc ? err.loc.join('.') : 'campo desconocido'
+            return `${field}: ${err.msg}`
+          })
+          errorMessage = messages.join('; ')
+        } else if (typeof errorData.detail === 'string') {
+          errorMessage = errorData.detail
+        } else if (errorData.message) {
+          errorMessage = errorData.message
+        }
+        
+        if (errorData.errors) {
+          errorMessage += ` - Detalles: ${JSON.stringify(errorData.errors)}`
+        }
+      } catch {
+        errorMessage = responseText || errorMessage
+      }
+
+      console.error("[v0] Error en createReference:", errorMessage)
+      return {
+        success: false,
+        error: errorMessage,
+      }
+    }
+
+    let responseData: any
+    try {
+      responseData = JSON.parse(responseText)
+    } catch (parseError) {
+      console.error("[v0] Error parseando respuesta:", parseError)
+      return {
+        success: false,
+        error: "Formato de respuesta inválido del servidor",
+      }
+    }
+
+    console.log("[v0] ✅ Referencia creada exitosamente")
+
+    return {
+      success: true,
+      message: "Referencia creada exitosamente",
+      data: responseData,
+    }
+  } catch (error) {
+    console.error("[v0] Error inesperado en createReference:", error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Error inesperado al crear la referencia",
+    }
+  }
+}
+
 export async function getGuardiansForSingleSchool(
   tenantIntegrationId: string,
   schoolId: string,
@@ -2284,7 +2753,7 @@ export async function getGuardiansForSingleSchool(
           const guardianId = guardian.id || guardian.guardian_id || guardian.email || guardian.phone
           const studentInfo = {
             student_id: studentId,
-            student_name: `${student.first_name || ""} ${student.last_name || ""}`.trim() || "-",
+            student_name: `${student.first_name || ""} ${student.middle_name || ""} ${student.last_name || ""}`.replace(/\s+/g, " ").trim() || "-",
             student_local_id: student.local_id || student.student_number || "-",
           }
           

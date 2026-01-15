@@ -9,8 +9,10 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  serverActions: {
-    bodySizeLimit: '10mb', // Aumentar límite para manejar grandes cantidades de datos de tutores/estudiantes
+  experimental: {
+    serverActions: {
+      bodySizeLimit: '50mb', // Aumentar límite para manejar grandes cantidades de datos de tutores/estudiantes
+    },
   },
 }
 

@@ -55,20 +55,36 @@ const normalizeDateForComparison = (dateStr: string): string => {
   }
 }
 
+// Función auxiliar para comparación fuzzy de nombres
+const namesFuzzyEqual = (name1: string, name2: string): boolean => {
+  if (!name1 || !name2) return false
+  const n1 = name1.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim()
+  const n2 = name2.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim()
+  if (n1 === n2) return true
+  // Si uno contiene al otro (para manejar apellido materno faltante)
+  if (n1.length > 5 && n2.length > 5 && (n1.includes(n2) || n2.includes(n1))) return true
+  // Si comparten al menos 2 palabras de 3+ caracteres
+  const words1 = n1.split(" ").filter(w => w.length >= 3)
+  const words2 = n2.split(" ").filter(w => w.length >= 3)
+  const commonWords = words1.filter(w => words2.includes(w))
+  return commonWords.length >= 2
+}
+
 const compareStudentData = (partnerData: any, cometaData: any, dataType: "students" | "guardians") => {
   if (!partnerData || !cometaData) return {}
 
   const discrepancies: Record<string, { partner: string; cometa: string; field: string }> = {}
 
   if (dataType === "guardians") {
-    // Comparar nombres de tutores
-    const partnerName = `${partnerData.firstName || ""} ${partnerData.lastName || ""}`.trim().toLowerCase()
-    const cometaName = `${cometaData.first_name || ""} ${cometaData.last_name || ""}`.trim().toLowerCase()
-    if (partnerName && cometaName && partnerName !== cometaName) {
+    // Comparar nombres de tutores (incluyendo middle_name)
+    const partnerName = `${partnerData.firstName || partnerData.first_name || ""} ${partnerData.middleName || partnerData.middle_name || ""} ${partnerData.lastName || partnerData.last_name || ""}`.replace(/\s+/g, " ").trim()
+    const cometaName = `${cometaData.first_name || ""} ${cometaData.middle_name || ""} ${cometaData.last_name || ""}`.replace(/\s+/g, " ").trim()
+    // Solo marcar como discrepancia si NO son fuzzy iguales
+    if (partnerName && cometaName && !namesFuzzyEqual(partnerName, cometaName)) {
       discrepancies.nombre = {
         field: "nombre",
-        partner: `${partnerData.firstName || ""} ${partnerData.lastName || ""}`.trim(),
-        cometa: `${cometaData.first_name || ""} ${cometaData.last_name || ""}`.trim(),
+        partner: partnerName,
+        cometa: cometaName,
       }
     }
 
@@ -106,14 +122,15 @@ const compareStudentData = (partnerData: any, cometaData: any, dataType: "studen
       }
     }
   } else {
-    // Comparar nombres de estudiantes
-    const partnerName = `${partnerData.first_name || ""} ${partnerData.last_name || ""}`.trim().toLowerCase()
-    const cometaName = `${cometaData.first_name || ""} ${cometaData.last_name || ""}`.trim().toLowerCase()
-    if (partnerName && cometaName && partnerName !== cometaName) {
+    // Comparar nombres de estudiantes (incluyendo middle_name)
+    const partnerName = `${partnerData.first_name || ""} ${partnerData.middle_name || ""} ${partnerData.last_name || ""}`.replace(/\s+/g, " ").trim()
+    const cometaName = `${cometaData.first_name || ""} ${cometaData.middle_name || ""} ${cometaData.last_name || ""}`.replace(/\s+/g, " ").trim()
+    // Solo marcar como discrepancia si NO son fuzzy iguales
+    if (partnerName && cometaName && !namesFuzzyEqual(partnerName, cometaName)) {
       discrepancies.nombre = {
         field: "nombre",
-        partner: `${partnerData.first_name || ""} ${partnerData.last_name || ""}`.trim(),
-        cometa: `${cometaData.first_name || ""} ${cometaData.last_name || ""}`.trim(),
+        partner: partnerName,
+        cometa: cometaName,
       }
     }
 
@@ -153,29 +170,43 @@ const compareStudentData = (partnerData: any, cometaData: any, dataType: "studen
       }
     }
 
-    // Comparar grado
-    const partnerGrade = String(
+    // Comparar grado - normalizar quitando símbolos como "°" para que "10°" == "10"
+    const normalizeGrade = (grade: string): string => {
+      return grade
+        .replace(/°/g, "") // Quitar símbolo de grado
+        .replace(/º/g, "") // Quitar símbolo ordinal
+        .replace(/\s+/g, "") // Quitar espacios
+        .trim()
+        .toLowerCase()
+    }
+    
+    const partnerGradeRaw = String(
       partnerData.grade_level || partnerData.grade || partnerData.gradelevel || partnerData.current_grade || "",
     )
     const cometaSection = cometaData.section
-    let cometaGrade = ""
+    let cometaGradeRaw = ""
     if (cometaSection) {
       if (typeof cometaSection === "string") {
         try {
           const parsed = JSON.parse(cometaSection)
-          cometaGrade = String(parsed.grade || "")
+          cometaGradeRaw = String(parsed.grade || "")
         } catch {
           // Ignore
         }
       } else if (typeof cometaSection === "object") {
-        cometaGrade = String(cometaSection.grade || "")
+        cometaGradeRaw = String(cometaSection.grade || "")
       }
     }
-    if (partnerGrade && cometaGrade && partnerGrade !== cometaGrade) {
+    
+    // Comparar versiones normalizadas (sin símbolos)
+    const partnerGradeNorm = normalizeGrade(partnerGradeRaw)
+    const cometaGradeNorm = normalizeGrade(cometaGradeRaw)
+    
+    if (partnerGradeRaw && cometaGradeRaw && partnerGradeNorm !== cometaGradeNorm) {
       discrepancies.grado = {
         field: "grado",
-        partner: partnerGrade,
-        cometa: cometaGrade,
+        partner: partnerGradeRaw,
+        cometa: cometaGradeRaw,
       }
     }
   }
@@ -198,13 +229,13 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
         })
       }
 
-      // Construir nombre según el tipo de entidad
+      // Construir nombre según el tipo de entidad (incluyendo middle_name)
       let entityName = ""
       if (dataType === "guardians") {
         // Para tutores, mostrar nombre del tutor + estudiantes asociados
         const guardianName = `${student.partnerData?.firstName || student.partnerData?.first_name || student.cometaData?.first_name || ""} ${
-          student.partnerData?.lastName || student.partnerData?.last_name || student.cometaData?.last_name || ""
-        }`.trim()
+          student.partnerData?.middleName || student.partnerData?.middle_name || student.cometaData?.middle_name || ""
+        } ${student.partnerData?.lastName || student.partnerData?.last_name || student.cometaData?.last_name || ""}`.replace(/\s+/g, " ").trim()
         
         // Obtener nombres de estudiantes asociados
         const studentsInfo = student.partnerData?.students || student.cometaData?.students || []
@@ -221,10 +252,10 @@ export function DiscrepancyResolver({ results, onBack, dataType = "students" }: 
           }
         }
       } else {
-        // Para estudiantes, solo mostrar nombre del estudiante
+        // Para estudiantes, solo mostrar nombre del estudiante (incluyendo middle_name)
         entityName = `${student.partnerData?.first_name || student.cometaData?.first_name || ""} ${
-          student.partnerData?.last_name || student.cometaData?.last_name || ""
-        }`.trim()
+          student.partnerData?.middle_name || student.cometaData?.middle_name || ""
+        } ${student.partnerData?.last_name || student.cometaData?.last_name || ""}`.replace(/\s+/g, " ").trim()
       }
 
       fieldDiscrepanciesMap.get(disc.field)!.discrepancies.push({
