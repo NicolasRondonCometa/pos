@@ -11,8 +11,8 @@ const inter = Inter({
 })
 
 export const metadata: Metadata = {
-  title: "PowerSchool Integration",
-  description: "Manage PowerSchool integrations and schools",
+  title: "PowerSchool POS",
+  description: "Sistema de gestion e integracion de PowerSchool para colegios",
   generator: "v0.app",
 }
 
